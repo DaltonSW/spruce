@@ -1,0 +1,363 @@
+// Package tui implements the Bubble Tea (v2) front-end. It depends only on
+// core.Backend + the backend registry, never on any specific package manager.
+package tui
+
+import (
+	"context"
+
+	tea "charm.land/bubbletea/v2"
+
+	"go.dalton.dog/spruce/internal/core"
+)
+
+type state int
+
+const (
+	stateDiscovering state = iota
+	stateSelecting
+	stateReviewing
+	stateApplying
+	stateDone
+)
+
+// row is one selectable line in the Selecting list.
+type row struct {
+	source string
+	update core.Update
+}
+
+// srcState tracks live progress for one backend during Applying.
+type srcState struct {
+	phase    string
+	item     string
+	done     int
+	failed   bool
+	finished bool
+	errText  string
+}
+
+// Model is the whole application state.
+type Model struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	state         state
+	width, height int
+
+	// Discovery results, keyed for Apply routing.
+	byName map[string]core.Backend
+	errs   map[string]string // backend name -> Check error
+
+	// Selecting. Each backend ("source") is rendered as its own always-visible
+	// panel; navigation is panel-local so a 200-package System list can't bury
+	// the smaller backends.
+	rows        []row
+	selected    map[string]bool // keyed by Update.ID()
+	focus       int             // index into panels()
+	panelCursor map[string]int  // per-source cursor (row index within that source)
+	panelOffset map[string]int  // per-source scroll offset
+
+	// Applying
+	applyCh  <-chan core.ProgressEvent
+	progress map[string]*srcState
+	logs     []string // tail of raw log lines
+
+	// autoYes skips the Selecting/Reviewing gates: once discovery finishes we
+	// apply every default-selected (non-pinned) update straight away. Set by -y.
+	autoYes bool
+
+	spinner int
+}
+
+// New builds the initial model. ctx is cancelled when the user quits, which
+// aborts any in-flight backend work. When autoYes is true the interactive gates
+// are skipped and all available updates are applied immediately.
+func New(ctx context.Context, cancel context.CancelFunc, autoYes bool) Model {
+	return Model{
+		ctx:         ctx,
+		cancel:      cancel,
+		state:       stateDiscovering,
+		byName:      map[string]core.Backend{},
+		errs:        map[string]string{},
+		selected:    map[string]bool{},
+		progress:    map[string]*srcState{},
+		panelCursor: map[string]int{},
+		panelOffset: map[string]int{},
+		autoYes:     autoYes,
+	}
+}
+
+func (m Model) Init() tea.Cmd {
+	return tea.Batch(checkCmd(m.ctx), tickCmd())
+}
+
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+		m.clampAllPanels()
+		return m, nil
+
+	case tea.KeyPressMsg:
+		return m.handleKey(msg)
+
+	case tickMsg:
+		m.spinner++
+		if m.state == stateDiscovering || m.state == stateApplying {
+			return m, tickCmd()
+		}
+		return m, nil
+
+	case discoveredMsg:
+		return m.onDiscovered(msg)
+
+	case applyReadyMsg:
+		m.applyCh = msg.ch
+		return m, waitForEvent(m.applyCh)
+
+	case applyEventMsg:
+		m.applyEvent(msg.ev)
+		return m, waitForEvent(m.applyCh)
+
+	case applyDoneMsg:
+		m.state = stateDone
+		return m, nil
+	}
+
+	return m, nil
+}
+
+func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		m.cancel()
+		return m, tea.Quit
+	}
+
+	switch m.state {
+	case stateSelecting:
+		return m.keySelecting(msg)
+	case stateReviewing:
+		return m.keyReviewing(msg)
+	case stateDone:
+		switch msg.String() {
+		case "q", "enter", "esc":
+			return m, tea.Quit
+		}
+	}
+	return m, nil
+}
+
+func (m Model) keySelecting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q":
+		m.cancel()
+		return m, tea.Quit
+	case "up", "k":
+		m.moveCursor(-1)
+	case "down", "j":
+		m.moveCursor(1)
+	case "left", "h":
+		m.focus = 0
+	case "right", "l":
+		if len(m.panels()) > 1 && m.focus == 0 {
+			m.focus = 1
+		}
+	case "tab":
+		if n := len(m.panels()); n > 0 {
+			m.focus = (m.focus + 1) % n
+		}
+	case "shift+tab":
+		if n := len(m.panels()); n > 0 {
+			m.focus = (m.focus - 1 + n) % n
+		}
+	case " ":
+		m.toggleCurrent()
+	case "a":
+		m.setAll(true)
+	case "N":
+		m.setAll(false)
+	case "enter":
+		if m.anySelected() {
+			m.state = stateReviewing
+		}
+	}
+	return m, nil
+}
+
+// moveCursor moves the cursor within the focused panel. In the right-hand
+// column (focus >= 1) it spills into the adjacent stacked panel at the edges, so
+// the right side reads as one continuous list.
+func (m *Model) moveCursor(d int) {
+	ps := m.panels()
+	if len(ps) == 0 {
+		return
+	}
+	if m.focus >= len(ps) {
+		m.focus = len(ps) - 1
+	}
+	src := ps[m.focus]
+	n := len(m.sourceRows(src))
+	c := m.panelCursor[src] + d
+
+	switch {
+	case c < 0:
+		if m.focus > 1 { // spill up to previous right-column panel
+			m.focus--
+			prev := ps[m.focus]
+			m.panelCursor[prev] = len(m.sourceRows(prev)) - 1
+			m.clampPanel(prev)
+			return
+		}
+		c = 0
+	case c >= n:
+		if m.focus >= 1 && m.focus < len(ps)-1 { // spill down to next right panel
+			m.focus++
+			next := ps[m.focus]
+			m.panelCursor[next] = 0
+			m.clampPanel(next)
+			return
+		}
+		c = n - 1
+	}
+	if c < 0 {
+		c = 0
+	}
+	m.panelCursor[src] = c
+	m.clampPanel(src)
+}
+
+func (m Model) keyReviewing(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "b":
+		m.state = stateSelecting
+	case "y", "enter":
+		m.state = stateApplying
+		return m, tea.Batch(startApplyCmd(m.ctx, m.selectionByBackend(), m.byName), tickCmd())
+	case "q", "ctrl+c":
+		m.cancel()
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m *Model) onDiscovered(msg discoveredMsg) (tea.Model, tea.Cmd) {
+	for _, r := range msg.results {
+		name := r.Backend.Name()
+		m.byName[name] = r.Backend
+		if r.Err != nil {
+			m.errs[name] = r.Err.Error()
+			continue
+		}
+		for _, u := range r.Updates {
+			m.rows = append(m.rows, row{source: name, update: u})
+			// Default: everything selectable is selected; pinned stays off.
+			m.selected[u.ID()] = !u.Pinned
+		}
+	}
+	m.state = stateSelecting
+
+	// -y: skip straight to applying the default selection, no keypress needed.
+	if m.autoYes && m.anySelected() {
+		m.state = stateApplying
+		return *m, tea.Batch(startApplyCmd(m.ctx, m.selectionByBackend(), m.byName), tickCmd())
+	}
+	return *m, nil
+}
+
+// --- selection helpers -----------------------------------------------------
+
+func (m *Model) toggleCurrent() {
+	r, ok := m.currentRow()
+	if !ok || r.update.Pinned {
+		return // nothing focused, or pinned items can't be selected
+	}
+	id := r.update.ID()
+	m.selected[id] = !m.selected[id]
+}
+
+// currentRow returns the row under the cursor in the focused panel.
+func (m Model) currentRow() (row, bool) {
+	ps := m.panels()
+	if len(ps) == 0 {
+		return row{}, false
+	}
+	f := m.focus
+	if f >= len(ps) {
+		f = len(ps) - 1
+	}
+	rs := m.sourceRows(ps[f])
+	i := m.panelCursor[ps[f]]
+	if i < 0 || i >= len(rs) {
+		return row{}, false
+	}
+	return rs[i], true
+}
+
+func (m *Model) setAll(v bool) {
+	for _, r := range m.rows {
+		if r.update.Pinned {
+			continue
+		}
+		m.selected[r.update.ID()] = v
+	}
+}
+
+func (m Model) anySelected() bool {
+	for _, v := range m.selected {
+		if v {
+			return true
+		}
+	}
+	return false
+}
+
+// selectionByBackend groups the currently-selected updates by backend name.
+func (m Model) selectionByBackend() map[string][]core.Update {
+	out := map[string][]core.Update{}
+	for _, r := range m.rows {
+		if m.selected[r.update.ID()] {
+			out[r.source] = append(out[r.source], r.update)
+		}
+	}
+	return out
+}
+
+// --- apply event handling --------------------------------------------------
+
+func (m *Model) applyEvent(ev core.ProgressEvent) {
+	st := m.progress[ev.Source]
+	if st == nil {
+		st = &srcState{}
+		m.progress[ev.Source] = st
+	}
+	switch ev.Kind {
+	case core.EventPhase:
+		st.phase = ev.Phase
+		if ev.Item != "" {
+			st.item = ev.Item
+		}
+	case core.EventItemDone:
+		st.done++
+	case core.EventError:
+		st.failed = true
+		st.errText = ev.Text
+		m.appendLog(ev.Source + ": " + ev.Text)
+	case core.EventPrompt:
+		m.appendLog(ev.Source + " ⏸ " + ev.Text)
+	case core.EventDone:
+		st.finished = true
+		st.phase = "Done"
+	case core.EventLog:
+		m.appendLog(ev.Text)
+	}
+}
+
+func (m *Model) appendLog(line string) {
+	const max = 200
+	m.logs = append(m.logs, line)
+	if len(m.logs) > max {
+		m.logs = m.logs[len(m.logs)-max:]
+	}
+}
