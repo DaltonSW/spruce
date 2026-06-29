@@ -52,6 +52,9 @@ type Model struct {
 	// panel; navigation is panel-local so a 200-package System list can't bury
 	// the smaller backends.
 	rows        []row
+	discovered  []string        // every detected backend, in Available() order; gets a panel even while still checking or empty
+	checking    map[string]bool // backends whose Check() hasn't returned yet (panel shows a spinner)
+	checkCh     <-chan checkResult
 	selected    map[string]bool // keyed by Update.ID()
 	focus       int             // index into panels()
 	panelCursor map[string]int  // per-source cursor (row index within that source)
@@ -67,6 +70,7 @@ type Model struct {
 	autoYes bool
 
 	spinner int
+	ticking bool // whether a spinner tick loop is currently running
 }
 
 // New builds the initial model. ctx is cancelled when the user quits, which
@@ -79,16 +83,18 @@ func New(ctx context.Context, cancel context.CancelFunc, autoYes bool) Model {
 		state:       stateDiscovering,
 		byName:      map[string]core.Backend{},
 		errs:        map[string]string{},
+		checking:    map[string]bool{},
 		selected:    map[string]bool{},
 		progress:    map[string]*srcState{},
 		panelCursor: map[string]int{},
 		panelOffset: map[string]int{},
 		autoYes:     autoYes,
+		ticking:     true, // Init starts a tick loop
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(checkCmd(m.ctx), tickCmd())
+	return tea.Batch(availableCmd(), tickCmd())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -104,13 +110,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.spinner++
-		if m.state == stateDiscovering || m.state == stateApplying {
+		if m.state == stateDiscovering || m.state == stateApplying || len(m.checking) > 0 {
 			return m, tickCmd()
 		}
+		m.ticking = false
 		return m, nil
 
-	case discoveredMsg:
-		return m.onDiscovered(msg)
+	case availableMsg:
+		return m.onAvailable(msg)
+
+	case checkStreamMsg:
+		m.checkCh = msg.ch
+		return m, waitForCheck(m.checkCh)
+
+	case checkedMsg:
+		return m.onChecked(msg)
+
+	case checkDoneMsg:
+		return m.onCheckDone()
 
 	case applyReadyMsg:
 		m.applyCh = msg.ch
@@ -234,7 +251,7 @@ func (m Model) keyReviewing(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.state = stateSelecting
 	case "y", "enter":
 		m.state = stateApplying
-		return m, tea.Batch(startApplyCmd(m.ctx, m.selectionByBackend(), m.byName), tickCmd())
+		return m, tea.Batch(startApplyCmd(m.ctx, m.selectionByBackend(), m.byName), m.ensureTick())
 	case "q", "ctrl+c":
 		m.cancel()
 		return m, tea.Quit
@@ -242,26 +259,58 @@ func (m Model) keyReviewing(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) onDiscovered(msg discoveredMsg) (tea.Model, tea.Cmd) {
-	for _, r := range msg.results {
-		name := r.Backend.Name()
-		m.byName[name] = r.Backend
-		if r.Err != nil {
-			m.errs[name] = r.Err.Error()
-			continue
-		}
+// ensureTick starts the spinner tick loop if it isn't already running, so we
+// never stack two loops (which would animate at double speed).
+func (m *Model) ensureTick() tea.Cmd {
+	if m.ticking {
+		return nil
+	}
+	m.ticking = true
+	return tickCmd()
+}
+
+// onAvailable records every detected backend and shows their panels right away
+// (each as a spinner), then kicks off the streaming Check across all of them.
+func (m *Model) onAvailable(msg availableMsg) (tea.Model, tea.Cmd) {
+	for _, b := range msg.backends {
+		name := b.Name()
+		m.byName[name] = b
+		m.discovered = append(m.discovered, name)
+		m.checking[name] = true
+	}
+	m.state = stateSelecting
+	if len(msg.backends) == 0 {
+		return *m, nil // nothing detected
+	}
+	return *m, tea.Batch(startCheckCmd(m.ctx, msg.backends), m.ensureTick())
+}
+
+// onChecked folds one backend's Check result into the model as it arrives, so
+// its panel fills in (or shows an error) without waiting for the others.
+func (m *Model) onChecked(msg checkedMsg) (tea.Model, tea.Cmd) {
+	r := msg.result
+	name := r.Backend.Name()
+	delete(m.checking, name)
+	if r.Err != nil {
+		m.errs[name] = r.Err.Error()
+	} else {
 		for _, u := range r.Updates {
 			m.rows = append(m.rows, row{source: name, update: u})
 			// Default: everything selectable is selected; pinned stays off.
 			m.selected[u.ID()] = !u.Pinned
 		}
 	}
-	m.state = stateSelecting
+	m.clampAllPanels()
+	return *m, waitForCheck(m.checkCh)
+}
 
-	// -y: skip straight to applying the default selection, no keypress needed.
+// onCheckDone fires once every backend has reported. For -y this is where we
+// finally have the full selection and can apply it.
+func (m *Model) onCheckDone() (tea.Model, tea.Cmd) {
+	m.checkCh = nil
 	if m.autoYes && m.anySelected() {
 		m.state = stateApplying
-		return *m, tea.Batch(startApplyCmd(m.ctx, m.selectionByBackend(), m.byName), tickCmd())
+		return *m, tea.Batch(startApplyCmd(m.ctx, m.selectionByBackend(), m.byName), m.ensureTick())
 	}
 	return *m, nil
 }

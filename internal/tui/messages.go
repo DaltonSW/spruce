@@ -18,7 +18,13 @@ func tickCmd() tea.Cmd {
 
 // --- message types ---------------------------------------------------------
 
-type discoveredMsg struct{ results []backend.CheckResult }
+// checkResult is one backend's Check outcome, streamed in as it completes.
+type checkResult = backend.CheckResult
+
+type availableMsg struct{ backends []core.Backend }
+type checkStreamMsg struct{ ch <-chan checkResult }
+type checkedMsg struct{ result checkResult }
+type checkDoneMsg struct{}
 type applyReadyMsg struct{ ch <-chan core.ProgressEvent }
 type applyEventMsg struct{ ev core.ProgressEvent }
 type applyDoneMsg struct{}
@@ -26,11 +32,44 @@ type tickMsg struct{}
 
 // --- commands --------------------------------------------------------------
 
-// checkCmd runs discovery + Check across all available backends off the UI
-// goroutine and reports the results.
-func checkCmd(ctx context.Context) tea.Cmd {
+// availableCmd detects which backends exist (fast: stat/lookpath/dbus). This is
+// reported first so every panel can appear immediately, before the slower
+// per-backend Check runs.
+func availableCmd() tea.Cmd {
 	return func() tea.Msg {
-		return discoveredMsg{results: backend.CheckAll(ctx)}
+		return availableMsg{backends: backend.Available()}
+	}
+}
+
+// startCheckCmd runs Check on every backend concurrently, each reporting into a
+// shared channel as it finishes so results pop into the UI granularly rather
+// than all at once.
+func startCheckCmd(ctx context.Context, backends []core.Backend) tea.Cmd {
+	return func() tea.Msg {
+		ch := make(chan checkResult, len(backends))
+		var wg sync.WaitGroup
+		for _, b := range backends {
+			wg.Add(1)
+			go func(b core.Backend) {
+				defer wg.Done()
+				ups, err := b.Check(ctx)
+				ch <- checkResult{Backend: b, Updates: ups, Err: err}
+			}(b)
+		}
+		go func() { wg.Wait(); close(ch) }()
+		return checkStreamMsg{ch: ch}
+	}
+}
+
+// waitForCheck pulls the next completed Check result, re-issued after each one —
+// the same streaming idiom used for apply events.
+func waitForCheck(ch <-chan checkResult) tea.Cmd {
+	return func() tea.Msg {
+		r, ok := <-ch
+		if !ok {
+			return checkDoneMsg{}
+		}
+		return checkedMsg{result: r}
 	}
 }
 

@@ -48,8 +48,8 @@ func (m Model) viewDiscovering() string {
 }
 
 func (m Model) viewSelecting() string {
-	if len(m.rows) == 0 {
-		return okStyle.Render("Everything is up to date. 🎉") + "\n\n" +
+	if len(m.panelSources()) == 0 {
+		return dimStyle.Render("No supported package managers found.") + "\n\n" +
 			helpStyle.Render("q quit")
 	}
 
@@ -84,41 +84,32 @@ func (m Model) viewSelecting() string {
 
 	var b strings.Builder
 	b.WriteString(grid + "\n")
-	for name, e := range m.errs {
-		b.WriteString(errStyle.Render(fmt.Sprintf("! %s check failed: %s", name, e)) + "\n")
+	status := dimStyle.Render(fmt.Sprintf("%d of %d selected", m.countSelected(), len(m.rows)))
+	if n := len(m.checking); n > 0 {
+		status += dimStyle.Render(fmt.Sprintf("  ·  %s checking %d…", m.spin(), n))
 	}
-	b.WriteString(dimStyle.Render(fmt.Sprintf("%d of %d selected", m.countSelected(), len(m.rows))) + "\n")
+	b.WriteString(status + "\n")
 	b.WriteString(helpStyle.Render(
 		"↑/↓ move · ←/→/tab panel · space toggle · a all · N none · enter review · q quit"))
 	return b.String()
 }
 
-// panels returns the backends to render, in display order: the largest (most
-// rows) first — shown as the tall left column — then the rest, stacked on the
-// right. With a single backend it's just that one, full width.
+// panelSources is every backend that should get a panel: all detected backends
+// (even those still checking or with zero updates). Falls back to the
+// rows-derived order when discovered isn't populated (e.g. in tests).
+func (m Model) panelSources() []string {
+	if len(m.discovered) > 0 {
+		return m.discovered
+	}
+	return m.orderedSources()
+}
+
+// panels returns the backends to render, in display order. Available() yields
+// the system backend (PackageKit, the big one) first, so it lands in the tall
+// left column with the rest stacked on the right. Using this fixed order rather
+// than a live row-count keeps the layout stable while results stream in.
 func (m Model) panels() []string {
-	srcs := m.orderedSources()
-	if len(srcs) <= 1 {
-		return srcs
-	}
-	counts := map[string]int{}
-	for _, r := range m.rows {
-		counts[r.source]++
-	}
-	primary := srcs[0]
-	for _, s := range srcs {
-		if counts[s] > counts[primary] {
-			primary = s
-		}
-	}
-	out := make([]string, 0, len(srcs))
-	out = append(out, primary)
-	for _, s := range srcs {
-		if s != primary {
-			out = append(out, s)
-		}
-	}
-	return out
+	return m.panelSources()
 }
 
 func (m Model) countSelected() int {
@@ -143,9 +134,9 @@ func (m Model) sourceRows(src string) []row {
 }
 
 // selectAvailHeight is the height available to the panel grid, after the title
-// block above and the error/count/help lines below.
+// block above (2) and the count/help lines below (2).
 func (m Model) selectAvailHeight() int {
-	return max(m.height-4-len(m.errs), 6)
+	return max(m.height-4, 6)
 }
 
 // panelTotalHeight is the bordered height (rows incl. border) of one panel.
@@ -203,7 +194,7 @@ func (m *Model) clampAllPanels() {
 	if m.focus >= len(m.panels()) {
 		m.focus = 0
 	}
-	for _, s := range m.orderedSources() {
+	for _, s := range m.panelSources() {
 		m.clampPanel(s)
 	}
 }
@@ -223,38 +214,54 @@ func (m Model) renderPanel(src string, totalW, totalH int, focused bool) string 
 		}
 	}
 
-	// Header: "SYSTEM  3/210".
-	count := fmt.Sprintf(" %d/%d", sel, len(rs))
-	title := truncate(strings.ToUpper(src), max(innerW-lipgloss.Width(count), 1))
-	header := padRight(groupStyle.Render(title)+dimStyle.Render(count), innerW)
+	checking := m.checking[src]
+	errText, errored := m.errs[src]
+
+	// Header: "SYSTEM  3/210"; while checking, a spinner stands in for the count.
+	right := fmt.Sprintf(" %d/%d", sel, len(rs))
+	if checking {
+		right = " " + m.spin()
+	}
+	title := truncate(strings.ToUpper(src), max(innerW-lipgloss.Width(right), 1))
+	header := padRight(groupStyle.Render(title)+dimStyle.Render(right), innerW)
 
 	lines := make([]string, 0, innerH)
 	lines = append(lines, header)
 
 	contentH := max(innerH-1, 1)
-	overflow := len(rs) > contentH
-	rowCap := contentH
-	if overflow {
-		rowCap = max(contentH-1, 1)
-	}
+	switch {
+	case checking:
+		fillCentered(&lines, contentH, innerW, dimStyle.Render(m.spin()+" checking for updates…"))
+	case errored:
+		fillCentered(&lines, contentH, innerW, errStyle.Render(truncate("✗ "+errText, max(innerW-2, 1))))
+	case len(rs) == 0:
+		// Detected but nothing to upgrade: show the box with a reassuring note.
+		fillCentered(&lines, contentH, innerW, okStyle.Render("Everything up-to-date!"))
+	default:
+		overflow := len(rs) > contentH
+		rowCap := contentH
+		if overflow {
+			rowCap = max(contentH-1, 1)
+		}
 
-	offset := m.panelOffset[src]
-	if offset < 0 || offset >= len(rs) {
-		offset = 0
-	}
-	end := min(offset+rowCap, len(rs))
-	nameW, curW, newW := panelColumns(rs, innerW)
+		offset := m.panelOffset[src]
+		if offset < 0 || offset >= len(rs) {
+			offset = 0
+		}
+		end := min(offset+rowCap, len(rs))
+		nameW, curW, newW := panelColumns(rs, innerW)
 
-	for i := offset; i < end; i++ {
-		isCur := focused && i == m.panelCursor[src]
-		lines = append(lines, padRight(m.renderPanelRow(rs[i], isCur, nameW, curW, newW), innerW))
-	}
-	for k := end - offset; k < rowCap; k++ {
-		lines = append(lines, padRight("", innerW))
-	}
-	if overflow {
-		status := fmt.Sprintf("  ↑ %d   ↓ %d", offset, len(rs)-end)
-		lines = append(lines, padRight(dimStyle.Render(status), innerW))
+		for i := offset; i < end; i++ {
+			isCur := focused && i == m.panelCursor[src]
+			lines = append(lines, padRight(m.renderPanelRow(rs[i], isCur, nameW, curW, newW), innerW))
+		}
+		for k := end - offset; k < rowCap; k++ {
+			lines = append(lines, padRight("", innerW))
+		}
+		if overflow {
+			status := fmt.Sprintf("  ↑ %d   ↓ %d", offset, len(rs)-end)
+			lines = append(lines, padRight(dimStyle.Render(status), innerW))
+		}
 	}
 
 	border := lipgloss.NewStyle().Border(lipgloss.RoundedBorder())
@@ -467,6 +474,28 @@ func padRight(s string, w int) string {
 		return s + strings.Repeat(" ", d)
 	}
 	return s
+}
+
+// fillCentered appends h lines of width w, with msg centered on the middle one.
+func fillCentered(lines *[]string, h, w int, msg string) {
+	mid := h / 2
+	for k := range h {
+		if k == mid {
+			*lines = append(*lines, padCenter(msg, w))
+		} else {
+			*lines = append(*lines, padRight("", w))
+		}
+	}
+}
+
+// padCenter pads s with spaces on both sides to a display width of w.
+func padCenter(s string, w int) string {
+	d := w - lipgloss.Width(s)
+	if d <= 0 {
+		return s
+	}
+	left := d / 2
+	return strings.Repeat(" ", left) + s + strings.Repeat(" ", d-left)
 }
 
 func truncate(s string, n int) string {
