@@ -80,7 +80,7 @@ func (d demoBackend) Apply(ctx context.Context, plan core.Plan) (<-chan core.Pro
 			if !emit(core.ProgressEvent{Kind: core.EventPhase, Item: u.Name, Phase: "Downloading"}) {
 				return
 			}
-			for f := 0.0; f < 1.0; f += 0.34 {
+			for f := 0.25; f <= 1.0; f += 0.25 {
 				if !sleep(ctx, 90*time.Millisecond) ||
 					!emit(core.ProgressEvent{Kind: core.EventProgress, Item: u.Name, Fraction: f}) {
 					return

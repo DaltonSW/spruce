@@ -36,7 +36,7 @@ func gridModel(counts map[string]int) Model {
 			m.selected[u.ID()] = true
 		}
 	}
-	m.clampAllPanels()
+	m.syncAllPanels()
 	return m
 }
 
@@ -46,9 +46,8 @@ func TestPanelsAlwaysVisible(t *testing.T) {
 	m := gridModel(map[string]int{"system": 220, "brew": 6, "flatpak": 3, "snap": 2})
 
 	// Drive the System cursor to the bottom.
-	for range 230 {
-		m.moveCursor(1)
-	}
+	m.tableFor("system").GotoBottom()
+	m.syncTable("system")
 	body := m.viewSelecting()
 
 	for _, want := range []string{"SYSTEM", "BREW", "FLATPAK", "SNAP"} {
@@ -64,8 +63,8 @@ func TestSelectingFitsTerminal(t *testing.T) {
 	m := gridModel(map[string]int{"system": 220, "brew": 6, "flatpak": 3, "snap": 2})
 
 	for _, cur := range []int{0, 100, 219} {
-		m.panelCursor["system"] = cur
-		m.clampPanel("system")
+		m.tableFor("system").SetCursor(cur)
+		m.syncTable("system")
 		full := "spruce\n\n" + m.viewSelecting() // mirrors View()'s wrapper
 
 		lines := strings.Split(full, "\n")
@@ -99,6 +98,21 @@ func TestPanelLayoutContentSized(t *testing.T) {
 	}
 	if got[0] <= got[2] {
 		t.Errorf("system panel %d should still be the tallest in %v", got[0], got)
+	}
+
+	// Tight fit: a small panel stays whole even when the system list has to shrink
+	// *below* it. The system drains all the way to the floor first, so an 8-update
+	// backend keeps its full 11 lines while system gives up its rows and scrolls —
+	// the old layout equalized the two and clipped the small panel instead.
+	tight := panelLayout([]int{100, 8}, 20)
+	if sum(tight) != 20 {
+		t.Errorf("tight layout %v sums to %d, want 20", tight, sum(tight))
+	}
+	if tight[1] != 11 {
+		t.Errorf("small panel should stay whole at 11, got %v", tight)
+	}
+	if tight[0] >= tight[1] {
+		t.Errorf("system should shrink below the whole small panel, got %v", tight)
 	}
 }
 
@@ -147,13 +161,26 @@ func TestStackedLayout(t *testing.T) {
 		}
 	}
 
-	// Down past the end of the system list must spill into the next panel, not
-	// stick on the system panel — the stack reads as one continuous list.
+	// Navigation is panel-local: moving down past the end of the system list must
+	// NOT leave the system panel — the cursor sticks and Tab is how you switch.
 	m.focus = 0
-	m.panelCursor["system"] = len(m.sourceRows("system")) - 1
-	m.moveCursor(1)
-	if m.focus == 0 {
-		t.Errorf("cursor did not spill out of the system panel when stacked")
+	sys := m.tableFor("system")
+	sys.GotoBottom()
+	bottom := sys.Cursor()
+	sys.MoveDown(1)
+	if m.focus != 0 {
+		t.Errorf("focus should stay on the system panel; navigation is panel-local")
+	}
+	if sys.Cursor() != bottom {
+		t.Errorf("cursor should stick at the last row, got %d want %d", sys.Cursor(), bottom)
+	}
+
+	// Tab advances focus to the next panel.
+	m.setFocus(0)
+	tm2, _ := m.keySelecting(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = tm2.(Model)
+	if m.focus != 1 {
+		t.Errorf("Tab should move focus to the next panel, got focus=%d", m.focus)
 	}
 }
 

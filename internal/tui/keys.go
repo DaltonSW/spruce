@@ -9,6 +9,10 @@ import "charm.land/bubbles/v2/key"
 type keyMap struct {
 	Up       key.Binding
 	Down     key.Binding
+	PageUp   key.Binding
+	PageDown key.Binding
+	Home     key.Binding
+	End      key.Binding
 	Left     key.Binding
 	Right    key.Binding
 	Tab      key.Binding
@@ -32,7 +36,12 @@ func defaultKeys() keyMap {
 		// Up carries the "move" label for the footer; Down is match-only.
 		Up:   key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/↓", "move")),
 		Down: key.NewBinding(key.WithKeys("down", "j")),
-		Left: key.NewBinding(key.WithKeys("left", "h")),
+		// Page/Home/End move within the focused panel; match-only (no footer help).
+		PageUp:   key.NewBinding(key.WithKeys("pgup", "ctrl+u")),
+		PageDown: key.NewBinding(key.WithKeys("pgdown", "ctrl+d")),
+		Home:     key.NewBinding(key.WithKeys("home", "g")),
+		End:      key.NewBinding(key.WithKeys("end", "G")),
+		Left:     key.NewBinding(key.WithKeys("left", "h")),
 		// Right carries the "panel" label for the footer; Left/Tab/ShiftTab match-only.
 		Right:    key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("←/→/tab", "panel")),
 		Tab:      key.NewBinding(key.WithKeys("tab")),

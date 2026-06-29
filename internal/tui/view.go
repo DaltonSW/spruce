@@ -8,6 +8,7 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/progress"
+	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/dustin/go-humanize"
@@ -48,15 +49,30 @@ func mustHex(s string) colorful.Color {
 	return c
 }
 
+// palette is every colour the UI uses, in one place. These are xterm-256 codes
+// (kept over truecolor hex so the UI still respects the user's terminal theme).
+// The one deliberate exception is the animated "checking" border, which lives in
+// gradPalette as hex because colorful.Hex requires it.
+const (
+	colAccent = "212" // pink — the single primary accent: titles, panel headers,
+	//                     the ▶ cursor, focused borders, and active progress.
+	colDim     = "244" // grey — secondary text and the empty progress track.
+	colHelp    = "240" // dark grey — the help footer and the done-state border.
+	colOk      = "78"  // green — selected, done, finished.
+	colErr     = "203" // red — errors and failed state.
+	colPin     = "214" // orange — the (pin) badge and the DRY RUN tag.
+	colModalBg = "236" // dark grey — the review modal's background.
+)
+
 var (
-	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
-	groupStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("75"))
-	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	pinStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	okStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("78"))
-	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	cursorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
-	helpStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(colAccent))
+	groupStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(colAccent))
+	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(colDim))
+	pinStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(colPin))
+	okStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color(colOk))
+	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(colErr))
+	cursorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colAccent)).Bold(true)
+	helpStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(colHelp))
 )
 
 func (m Model) View() tea.View {
@@ -101,10 +117,10 @@ func (m Model) viewSelecting() string {
 	b.WriteString(grid + "\n")
 	status := dimStyle.Render(fmt.Sprintf("%d of %d selected", m.countSelected(), len(m.rows)))
 	if b := m.selectedBytes(); b > 0 {
-		status += dimStyle.Render("  ·  " + formatBytes(b) + " to download")
+		status += dimStyle.Render(sep + formatBytes(b) + " to download")
 	}
 	if n := len(m.checking); n > 0 {
-		status += dimStyle.Render(fmt.Sprintf("  ·  %s checking %d…", m.spinner.View(), n))
+		status += dimStyle.Render(fmt.Sprintf("%s%s checking %d…", sep, m.spinner.View(), n))
 	}
 	status += m.dryRunBadge()
 	b.WriteString(status + "\n")
@@ -173,36 +189,70 @@ func (m Model) selectAvailHeight() int {
 // and one content row.
 const minStackPanelH = 4
 
+// panelGutter is the blank left margin inside every panel, so the header and rows
+// don't hug the border. Content is sized to innerW-panelGutter and then prefixed
+// with this many spaces, keeping each line exactly innerW wide.
+const panelGutter = 1
+
+// sep joins segments of a top-level status line (" 3 selected · 12 MB · …");
+// sepTight is the compact form for dense apply rows where width is scarce.
+const (
+	sep      = "  ·  "
+	sepTight = " · "
+)
+
+// indent prefixes the panel's left gutter to a line already sized to the content
+// width, yielding a line of the full inner width.
+func indent(line string) string {
+	return strings.Repeat(" ", panelGutter) + line
+}
+
+// panelHeader renders a panel's header line — a bold accent title with a dim
+// right-hand note (count/spinner/timer) beside it — padded to the content width.
+// Shared by the selecting and applying panels so the two can't drift.
+func panelHeader(src, right string, contentW int) string {
+	title := truncate(strings.ToUpper(src), max(contentW-lipgloss.Width(right), 1))
+	return padRight(groupStyle.Render(title)+dimStyle.Render(right), contentW)
+}
+
 // panelLayout returns the total (bordered) height of each panel, in order, given
 // the content lines each one wants (its update count, or 1 for a
 // checking/errored/up-to-date panel). Each panel is sized to its content —
 // border + header + content — so a backend with a single update doesn't sprawl.
-// When the panels' natural heights don't all fit in availH, the tallest panels
-// shrink first (never below the floor) so the big system list scrolls while the
-// small panels stay whole. If everything fits, the stack is shorter than availH
-// and leaves blank space below rather than padding panels out.
+// When the panels' natural heights don't all fit in availH, the panel with the
+// largest natural height (the system list) is drained all the way to the floor
+// before any smaller panel is touched — so the big list shrinks and scrolls
+// while the small backends stay whole. If everything fits, the stack is shorter
+// than availH and leaves blank space below rather than padding panels out.
 func panelLayout(content []int, availH int) []int {
 	heights := make([]int, len(content))
+	naturals := make([]int, len(content))
 	total := 0
 	for i, c := range content {
-		heights[i] = max(c+3, minStackPanelH) // 2 border + 1 header + content
+		naturals[i] = max(c+3, minStackPanelH) // 2 border + 1 header + content
+		heights[i] = naturals[i]
 		total += heights[i]
 	}
 
-	// Reclaim the overflow by trimming the tallest panel one row at a time until
-	// everything fits or nothing can shrink further.
+	// Reclaim the overflow from the panels with the largest natural heights first,
+	// draining each fully to the floor before moving to the next-largest — so the
+	// system list absorbs the squeeze and the small panels keep their full height.
 	for total > availH {
-		tallest := -1
+		idx := -1
 		for i, h := range heights {
-			if h > minStackPanelH && (tallest < 0 || h > heights[tallest]) {
-				tallest = i
+			if h <= minStackPanelH {
+				continue // already at the floor; can't shrink further
+			}
+			if idx < 0 || naturals[i] > naturals[idx] {
+				idx = i
 			}
 		}
-		if tallest < 0 {
+		if idx < 0 {
 			break // all at the floor; the stack overflows the screen
 		}
-		heights[tallest]--
-		total--
+		take := min(heights[idx]-minStackPanelH, total-availH)
+		heights[idx] -= take
+		total -= take
 	}
 	return heights
 }
@@ -252,41 +302,90 @@ func panelRows(rowCount, contentH int) (rowCap int, showStatus bool) {
 	return contentH, false
 }
 
-// panelRowCap is how many package rows fit in a panel's inner area, reserving a
-// line for the header and (when the list overflows) the scroll status line.
-func (m Model) panelRowCap(src string) int {
+// panelInnerW is the inner (content) width of a panel: full terminal width minus
+// the two border columns. Mirrors the innerW computed in renderPanel.
+func (m Model) panelInnerW() int {
+	return max(m.width-2, 8)
+}
+
+// panelContentW is the writable width inside a panel: the inner width less the
+// left gutter. Tables and columns are sized to this; the gutter is added back
+// when the lines are assembled.
+func (m Model) panelContentW() int {
+	return max(m.panelInnerW()-panelGutter, 4)
+}
+
+// panelRowsFor returns how many package rows fit in a panel's content area and
+// whether the scroll status line is shown (mirrors renderPanel's accounting).
+func (m Model) panelRowsFor(src string) (rowCap int, showStatus bool) {
 	innerH := max(m.panelTotalHeight(src)-2, 1) // minus top/bottom border
 	contentH := max(innerH-1, 1)                // minus header
-	cap, _ := panelRows(len(m.sourceRows(src)), contentH)
-	return cap
+	return panelRows(len(m.sourceRows(src)), contentH)
 }
 
-// clampPanel keeps a panel's cursor in range and scrolled into view.
-func (m *Model) clampPanel(src string) {
-	n := len(m.sourceRows(src))
-	if n == 0 {
-		m.panelCursor[src], m.panelOffset[src] = 0, 0
+// focusedSource is the backend whose panel currently has focus, or "" if none.
+func (m Model) focusedSource() string {
+	ps := m.panels()
+	if m.focus >= 0 && m.focus < len(ps) {
+		return ps[m.focus]
+	}
+	return ""
+}
+
+// tableFor returns the persistent table.Model backing src's panel, creating it on
+// first use. The table owns the panel's cursor + scroll; spruce renders each row
+// itself (into a single full-width column) so the existing per-cell styling —
+// checkbox, dim versions, (pin) badge, ▶ marker — carries over verbatim. Cell and
+// Selected styles are no-ops because all styling lives in the rendered row.
+func (m *Model) tableFor(src string) *table.Model {
+	if t, ok := m.tables[src]; ok {
+		return t
+	}
+	t := table.New(
+		table.WithStyles(table.Styles{
+			Header:   lipgloss.NewStyle(),
+			Cell:     lipgloss.NewStyle(),
+			Selected: lipgloss.NewStyle(),
+		}),
+	)
+	m.tables[src] = &t
+	return &t
+}
+
+// syncTable refreshes src's table to match the current rows, selection, focus and
+// layout: it sizes the table to the panel and rebuilds every row (so the ▶ marker
+// and checkboxes track state). Called whenever any of those change.
+func (m *Model) syncTable(src string) {
+	if src == "" {
 		return
 	}
-	c := min(max(m.panelCursor[src], 0), n-1)
-	m.panelCursor[src] = c
+	t := m.tableFor(src)
+	contentW := m.panelContentW()
+	rowCap, _ := m.panelRowsFor(src)
 
-	capRows := m.panelRowCap(src)
-	o := min(m.panelOffset[src], c) // scroll up to keep the cursor in view
-	if c >= o+capRows {
-		o = c - capRows + 1 // scroll down
+	t.SetColumns([]table.Column{{Title: "", Width: contentW}})
+	t.SetWidth(contentW)
+	t.SetHeight(rowCap + 1) // +1 for the table's (blank) header line
+
+	rs := m.sourceRows(src)
+	focused := src == m.focusedSource()
+	cur := t.Cursor()
+	nameW, curW, newW, sizeW := panelColumns(rs, contentW)
+	rows := make([]table.Row, len(rs))
+	for i, r := range rs {
+		rows[i] = table.Row{m.renderPanelRow(r, focused && i == cur, nameW, curW, newW, sizeW)}
 	}
-	o = min(o, n-capRows)
-	o = max(o, 0)
-	m.panelOffset[src] = o
+	t.SetRows(rows)
 }
 
-func (m *Model) clampAllPanels() {
+// syncAllPanels clamps focus and resyncs every panel's table; used after a resize
+// or when results stream in (a growing panel reflows the whole stack's heights).
+func (m *Model) syncAllPanels() {
 	if m.focus >= len(m.panels()) {
 		m.focus = 0
 	}
 	for _, s := range m.panelSources() {
-		m.clampPanel(s)
+		m.syncTable(s)
 	}
 }
 
@@ -296,6 +395,7 @@ func (m *Model) clampAllPanels() {
 func (m Model) renderPanel(src string, totalW, totalH int, focused bool) string {
 	innerW := max(totalW-2, 8)
 	innerH := max(totalH-2, 1)
+	contentW := max(innerW-panelGutter, 4)
 	rs := m.sourceRows(src)
 
 	sel := 0
@@ -313,42 +413,55 @@ func (m Model) renderPanel(src string, totalW, totalH int, focused bool) string 
 	if checking {
 		right = " " + m.spinner.View()
 	}
-	title := truncate(strings.ToUpper(src), max(innerW-lipgloss.Width(right), 1))
-	header := padRight(groupStyle.Render(title)+dimStyle.Render(right), innerW)
 
 	lines := make([]string, 0, innerH)
-	lines = append(lines, header)
+	lines = append(lines, panelHeader(src, right, contentW))
 
 	contentH := max(innerH-1, 1)
 	switch {
 	case checking:
-		fillCentered(&lines, contentH, innerW, dimStyle.Render(m.spinner.View()+" checking for updates…"))
+		fillCentered(&lines, contentH, contentW, dimStyle.Render(m.spinner.View()+" checking for updates…"))
 	case errored:
-		fillCentered(&lines, contentH, innerW, errStyle.Render(truncate("✗ "+errText, max(innerW-2, 1))))
+		fillCentered(&lines, contentH, contentW, errStyle.Render(truncate("✗ "+errText, max(contentW-2, 1))))
 	case len(rs) == 0:
 		// Detected but nothing to upgrade: show the box with a reassuring note.
-		fillCentered(&lines, contentH, innerW, okStyle.Render("Everything up-to-date!"))
+		fillCentered(&lines, contentH, contentW, okStyle.Render("Everything up-to-date!"))
 	default:
 		rowCap, showStatus := panelRows(len(rs), contentH)
+		m.syncTable(src) // size the table + rebuild rows (cursor marker, checkboxes)
+		t := m.tableFor(src)
 
-		offset := m.panelOffset[src]
-		if offset < 0 || offset >= len(rs) {
-			offset = 0
+		// table.View() is a (blank) header line + its viewport; drop the header and
+		// keep exactly rowCap content lines, padding short lists as the manual
+		// renderer did so the border wraps to an exact size.
+		tv := strings.Split(t.View(), "\n")
+		var body []string
+		if len(tv) > 1 {
+			body = tv[1:]
 		}
-		end := min(offset+rowCap, len(rs))
-		nameW, curW, newW, sizeW := panelColumns(rs, innerW)
+		for i := range body {
+			body[i] = padRight(body[i], contentW)
+		}
+		for len(body) < rowCap {
+			body = append(body, padRight("", contentW))
+		}
+		lines = append(lines, body[:rowCap]...)
 
-		for i := offset; i < end; i++ {
-			isCur := focused && i == m.panelCursor[src]
-			lines = append(lines, padRight(m.renderPanelRow(rs[i], isCur, nameW, curW, newW, sizeW), innerW))
-		}
-		for k := end - offset; k < rowCap; k++ {
-			lines = append(lines, padRight("", innerW))
-		}
 		if showStatus {
-			status := fmt.Sprintf("  ↑ %d   ↓ %d", offset, len(rs)-end)
-			lines = append(lines, padRight(dimStyle.Render(status), innerW))
+			// The table's viewport hides its scroll offset, so approximate the
+			// hidden-above / hidden-below counts from the cursor and capacity.
+			cur := t.Cursor()
+			maxOff := max(len(rs)-rowCap, 0)
+			above := min(max(cur-(rowCap-1), 0), maxOff)
+			below := max(len(rs)-rowCap-above, 0)
+			status := fmt.Sprintf("↑ %d   ↓ %d", above, below)
+			lines = append(lines, padRight(dimStyle.Render(status), contentW))
 		}
+	}
+
+	// Add the left gutter back to every content line so each is exactly innerW.
+	for i := range lines {
+		lines[i] = indent(lines[i])
 	}
 
 	// While checking, draw a gradient border whose phase rotates each tick;
@@ -364,7 +477,7 @@ func (m Model) renderPanel(src string, totalW, totalH int, focused bool) string 
 func solidBox(content []string, focused bool) string {
 	border := lipgloss.NewStyle().Border(lipgloss.RoundedBorder())
 	if focused {
-		border = border.BorderForeground(lipgloss.Color("212"))
+		border = border.BorderForeground(lipgloss.Color(colAccent))
 	} else {
 		border = border.BorderForeground(lipgloss.Color(dimBorder))
 	}
@@ -587,7 +700,7 @@ func (m Model) reviewModal() string {
 			okStyle.Render(fmt.Sprintf("%d package%s", total, plural(total))),
 			len(rows), plural(len(rows)))
 		if totalBytes > 0 {
-			summary += dimStyle.Render("  ·  " + formatBytes(totalBytes) + " to download")
+			summary += dimStyle.Render(sep + formatBytes(totalBytes) + " to download")
 		}
 		body = append(body, "", summary)
 	}
@@ -595,8 +708,8 @@ func (m Model) reviewModal() string {
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("212")).
-		Background(lipgloss.Color("236")).
+		BorderForeground(lipgloss.Color(colAccent)).
+		Background(lipgloss.Color(colModalBg)).
 		Padding(1, 3).
 		Render(lipgloss.JoinVertical(lipgloss.Left, body...))
 }
@@ -661,7 +774,7 @@ func (m Model) viewApplying() string {
 	}
 	status := dimStyle.Render(fmt.Sprintf("%d of %d package managers finished", done, total))
 	if m.state != stateDone {
-		status = dimStyle.Render(fmt.Sprintf("%s applying  ·  %s", m.spinner.View(),
+		status = dimStyle.Render(fmt.Sprintf("%s applying%s%s", m.spinner.View(), sep,
 			fmt.Sprintf("%d of %d package managers finished", done, total)))
 	}
 	status += m.dryRunBadge()
@@ -752,6 +865,7 @@ func activeRow(pkgs []core.Update, st *srcState) int {
 func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 	innerW := max(totalW-2, 8)
 	innerH := max(totalH-2, 1)
+	contentW := max(innerW-panelGutter, 4)
 	st := m.progress[src]
 	pkgs := m.selectionByBackend()[src]
 	total := len(pkgs)
@@ -769,11 +883,9 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 			right += "  " + formatDuration(d)
 		}
 	}
-	title := truncate(strings.ToUpper(src), max(innerW-lipgloss.Width(right), 1))
-	header := padRight(groupStyle.Render(title)+dimStyle.Render(right), innerW)
 
 	lines := make([]string, 0, innerH)
-	lines = append(lines, header)
+	lines = append(lines, panelHeader(src, right, contentW))
 	contentH := max(innerH-1, 1)
 
 	body := make([]string, 0, contentH)
@@ -786,14 +898,24 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 	listH := contentH - barH
 
 	// The package list, scrolled so the active item stays in view.
-	nameW, curW, newW, sizeW := applyColumns(pkgs, innerW)
+	// Reserve a per-row bar column, dropping it on narrow panels so the columns
+	// keep today's behaviour when there's no room. "+2" is the leading gap.
+	barW := 0
+	if contentW >= 48 {
+		barW = clampInt(contentW/5, 10, 18)
+	}
+	colW := contentW
+	if barW > 0 {
+		colW = contentW - barW - 2
+	}
+	nameW, curW, newW, sizeW := applyColumns(pkgs, colW)
 	offset := 0
 	if total > listH {
 		offset = clampInt(activeRow(pkgs, st)-listH/2, 0, total-listH)
 	}
 	end := min(offset+listH, total)
 	for i := offset; i < end; i++ {
-		body = append(body, padRight(m.renderApplyRow(i, pkgs[i], st, nameW, curW, newW, sizeW, innerW), innerW))
+		body = append(body, padRight(m.renderApplyRow(i, pkgs[i], st, nameW, curW, newW, sizeW, barW, contentW), contentW))
 	}
 
 	// Short list: fill the gap above the bar with the backend's output tail.
@@ -806,10 +928,10 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 			logs = logs[len(logs)-gap:]
 		}
 		for _, l := range logs {
-			body = append(body, padRight(dimStyle.Render(truncate(stripCR(l), innerW)), innerW))
+			body = append(body, padRight(dimStyle.Render(truncate(stripCR(l), contentW)), contentW))
 		}
 		for len(body) < listH {
-			body = append(body, padRight("", innerW))
+			body = append(body, padRight("", contentW))
 		}
 	}
 
@@ -818,21 +940,26 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 		for _, u := range pkgs {
 			totalBytes += u.SizeBytes
 		}
-		body = append(body, padRight(m.applyBottomLine(st, done, total, totalBytes, innerW), innerW))
+		body = append(body, padRight(m.applyBottomLine(st, done, total, totalBytes, contentW), contentW))
 	}
 	for len(body) < contentH {
-		body = append(body, padRight("", innerW))
+		body = append(body, padRight("", contentW))
 	}
 	lines = append(lines, body[:contentH]...)
+
+	// Add the left gutter back to every content line so each is exactly innerW.
+	for i := range lines {
+		lines[i] = indent(lines[i])
+	}
 
 	// Border colour reflects state; animate the gradient while still working.
 	switch {
 	case st != nil && st.failed:
-		return solidBoxColor(lines, "203")
+		return solidBoxColor(lines, colErr)
 	case st != nil && st.finished:
-		return solidBoxColor(lines, "78")
+		return solidBoxColor(lines, colOk)
 	case m.state == stateDone:
-		return solidBoxColor(lines, "240")
+		return solidBoxColor(lines, colHelp)
 	default:
 		return gradientBox(lines, innerW, innerH, float64(m.tick)*0.03)
 	}
@@ -843,7 +970,7 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 // and a live note (phase + downloaded/size + percent) so you can watch the work
 // move down the list. The whole row is bounded to innerW so the note can't spill
 // past the border.
-func (m Model) renderApplyRow(i int, u core.Update, st *srcState, nameW, curW, newW, sizeW, innerW int) string {
+func (m Model) renderApplyRow(i int, u core.Update, st *srcState, nameW, curW, newW, sizeW, barW, innerW int) string {
 	status := pkgRowStatus(i, u.Name, st)
 	var icon string
 	switch status {
@@ -864,6 +991,12 @@ func (m Model) renderApplyRow(i int, u core.Update, st *srcState, nameW, curW, n
 		icon, name, dimStyle.Render(cur), dimStyle.Render(" → "), nv)
 	if sizeW > 0 {
 		line += "  " + dimStyle.Render(padLeft(truncate(formatBytes(u.SizeBytes), sizeW), sizeW))
+	}
+
+	// A per-row download bar that fills as the package downloads and stays full
+	// once it's done, so the list reads as a wall of progress filling top-to-bottom.
+	if barW > 0 {
+		line += "  " + rowProgressBar(rowFraction(status, u.Name, st), barW, status)
 	}
 
 	// Annotate the in-flight package with what it's doing right now, truncated to
@@ -909,7 +1042,7 @@ func (m Model) applyBottomLine(st *srcState, done, total int, totalBytes int64, 
 	case st != nil && st.finished:
 		note := fmt.Sprintf("✓ done (%d upgraded)", done)
 		if d := st.elapsed(); d > 0 {
-			note += " · " + formatDuration(d)
+			note += sepTight + formatDuration(d)
 		}
 		return okStyle.Render(note)
 	default:
@@ -953,7 +1086,7 @@ func rateETA(st *srcState, frac float64, totalBytes int64) string {
 			parts = append(parts, "ETA "+formatDuration(time.Duration(remain*float64(time.Second))))
 		}
 	}
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, sepTight)
 }
 
 // applyColumns sizes the name / current / new / size columns for an apply panel,
@@ -1052,28 +1185,66 @@ func padLeft(s string, w int) string {
 }
 
 // progressBar renders a [████░░░░] bar of the given width for fraction f, using
-// the bubbles progress component. The fill colour reflects state (blue active,
+// the bubbles progress component. The fill colour reflects state (accent active,
 // green finished, red failed) and the empty track stays dim, matching the look
 // the hand-rolled bar had.
 func progressBar(f float64, w int, st *srcState) string {
-	if w < 4 {
-		return strings.Repeat(" ", max(w, 0))
-	}
-	fill := lipgloss.Color("75")
+	fill := colAccent
 	switch {
 	case st != nil && st.failed:
-		fill = lipgloss.Color("203")
+		fill = colErr
 	case st != nil && st.finished:
-		fill = lipgloss.Color("78")
+		fill = colOk
+	}
+	return coloredBar(f, w, fill)
+}
+
+// rowProgressBar draws one apply row's bar, coloured by that row's status —
+// dim/idle while pending, accent while downloading, green once done, red on
+// failure — so completed rows read as a full green wall as the run progresses.
+func rowProgressBar(f float64, w int, status pkgStat) string {
+	fill := colDim // pending: dim, reads as an empty/idle track
+	switch status {
+	case statActive:
+		fill = colAccent
+	case statDone:
+		fill = colOk
+	case statFailed:
+		fill = colErr
+	}
+	return coloredBar(f, w, fill)
+}
+
+// coloredBar renders a [████░░░░] bar of the given width and fill colour using
+// the bubbles progress component; the empty track stays dim, matching dimStyle.
+func coloredBar(f float64, w int, fill string) string {
+	if w < 4 {
+		return strings.Repeat(" ", max(w, 0))
 	}
 	bar := progress.New(
 		progress.WithoutPercentage(),
 		progress.WithFillCharacters('█', '░'),
 		progress.WithWidth(w),
 	)
-	bar.FullColor = fill
-	bar.EmptyColor = lipgloss.Color("244") // matches dimStyle
+	bar.FullColor = lipgloss.Color(fill)
+	bar.EmptyColor = lipgloss.Color(colDim)
 	return bar.ViewAs(clamp01(f))
+}
+
+// rowFraction derives an apply row's bar fill from its status: a finished/seen
+// package reads full and stays full, the active one shows its persisted download
+// progress, and pending rows read empty. Backends with no per-package data report
+// 0 here, so their rows simply fill on completion.
+func rowFraction(status pkgStat, name string, st *srcState) float64 {
+	switch status {
+	case statDone:
+		return 1.0
+	case statActive, statFailed:
+		if st != nil {
+			return clamp01(st.pkgFrac[name])
+		}
+	}
+	return 0
 }
 
 func stFraction(st *srcState) float64 {

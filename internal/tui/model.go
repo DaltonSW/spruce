@@ -9,6 +9,7 @@ import (
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
 
 	"go.dalton.dog/spruce/internal/core"
@@ -35,7 +36,8 @@ type srcState struct {
 	phase    string
 	item     string
 	done     int
-	fraction float64 // 0–1 progress for the current item, if reported
+	fraction float64            // 0–1 progress for the current item, if reported
+	pkgFrac  map[string]float64 // monotonic per-package progress (0–1), keyed by name
 	failed   bool
 	finished bool
 	errText  string
@@ -99,14 +101,17 @@ type Model struct {
 	// Selecting. Each backend ("source") is rendered as its own always-visible
 	// panel; navigation is panel-local so a 200-package System list can't bury
 	// the smaller backends.
-	rows        []row
-	discovered  []string        // every detected backend, in Available() order; gets a panel even while still checking or empty
-	checking    map[string]bool // backends whose Check() hasn't returned yet (panel shows a spinner)
-	checkCh     <-chan checkResult
-	selected    map[string]bool // keyed by Update.ID()
-	focus       int             // index into panels()
-	panelCursor map[string]int  // per-source cursor (row index within that source)
-	panelOffset map[string]int  // per-source scroll offset
+	rows       []row
+	discovered []string        // every detected backend, in Available() order; gets a panel even while still checking or empty
+	checking   map[string]bool // backends whose Check() hasn't returned yet (panel shows a spinner)
+	checkCh    <-chan checkResult
+	selected   map[string]bool // keyed by Update.ID()
+	focus      int             // index into panels()
+
+	// One table per backend owns that panel's cursor + scroll; spruce keeps
+	// selection (m.selected) and styling external. Pointers, so all value-copies
+	// of Model share the same table state.
+	tables map[string]*table.Model
 
 	// Applying
 	applyCh  <-chan core.ProgressEvent
@@ -146,24 +151,23 @@ func New(ctx context.Context, cancel context.CancelFunc, opts Options) Model {
 	}))
 
 	return Model{
-		ctx:         ctx,
-		cancel:      cancel,
-		state:       stateDiscovering,
-		keys:        defaultKeys(),
-		help:        h,
-		spinner:     sp,
-		byName:      map[string]core.Backend{},
-		errs:        map[string]string{},
-		checking:    map[string]bool{},
-		selected:    map[string]bool{},
-		progress:    map[string]*srcState{},
-		panelCursor: map[string]int{},
-		panelOffset: map[string]int{},
-		autoYes:     opts.AutoYes,
-		demo:        opts.Demo,
-		dryRun:      opts.DryRun,
-		ticking:     true, // Init starts the gradient tick loop
-		spinning:    true, // Init starts the spinner tick loop
+		ctx:      ctx,
+		cancel:   cancel,
+		state:    stateDiscovering,
+		keys:     defaultKeys(),
+		help:     h,
+		spinner:  sp,
+		byName:   map[string]core.Backend{},
+		errs:     map[string]string{},
+		checking: map[string]bool{},
+		selected: map[string]bool{},
+		progress: map[string]*srcState{},
+		tables:   map[string]*table.Model{},
+		autoYes:  opts.AutoYes,
+		demo:     opts.Demo,
+		dryRun:   opts.DryRun,
+		ticking:  true, // Init starts the gradient tick loop
+		spinning: true, // Init starts the spinner tick loop
 	}
 }
 
@@ -183,7 +187,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.help.SetWidth(msg.Width)
-		m.clampAllPanels()
+		m.syncAllPanels()
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -260,24 +264,32 @@ func (m Model) keySelecting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.cancel()
 		return m, tea.Quit
 	case key.Matches(msg, m.keys.Up):
-		m.moveCursor(-1)
+		m.moveInPanel(func(t *table.Model) { t.MoveUp(1) })
 	case key.Matches(msg, m.keys.Down):
-		m.moveCursor(1)
+		m.moveInPanel(func(t *table.Model) { t.MoveDown(1) })
+	case key.Matches(msg, m.keys.PageUp):
+		m.moveInPanel(func(t *table.Model) { t.MoveUp(t.Height()) })
+	case key.Matches(msg, m.keys.PageDown):
+		m.moveInPanel(func(t *table.Model) { t.MoveDown(t.Height()) })
+	case key.Matches(msg, m.keys.Home):
+		m.moveInPanel(func(t *table.Model) { t.GotoTop() })
+	case key.Matches(msg, m.keys.End):
+		m.moveInPanel(func(t *table.Model) { t.GotoBottom() })
 	case key.Matches(msg, m.keys.Left):
 		if m.focus > 0 {
-			m.focus--
+			m.setFocus(m.focus - 1)
 		}
 	case key.Matches(msg, m.keys.Right):
 		if m.focus < len(m.panels())-1 {
-			m.focus++
+			m.setFocus(m.focus + 1)
 		}
 	case key.Matches(msg, m.keys.Tab):
 		if n := len(m.panels()); n > 0 {
-			m.focus = (m.focus + 1) % n
+			m.setFocus((m.focus + 1) % n)
 		}
 	case key.Matches(msg, m.keys.ShiftTab):
 		if n := len(m.panels()); n > 0 {
-			m.focus = (m.focus - 1 + n) % n
+			m.setFocus((m.focus - 1 + n) % n)
 		}
 	case key.Matches(msg, m.keys.Toggle):
 		m.toggleCurrent()
@@ -295,56 +307,25 @@ func (m Model) keySelecting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// canSpillUp / canSpillDown report whether moving the cursor past a panel's edge
-// should carry focus into the adjacent panel. Panels stack as one continuous
-// vertical column, so spill applies across all of them.
-func (m Model) canSpillUp() bool {
-	return m.focus > 0
-}
-
-func (m Model) canSpillDown() bool {
-	return m.focus < len(m.panels())-1
-}
-
-// moveCursor moves the cursor within the focused panel, spilling into the
-// adjacent panel at the edges so the whole stack reads as one continuous list.
-func (m *Model) moveCursor(d int) {
-	ps := m.panels()
-	if len(ps) == 0 {
+// moveInPanel applies a movement to the focused panel's table, then resyncs that
+// panel so the ▶ cursor marker follows. Navigation is panel-local: the cursor
+// never leaves the focused panel (use Tab / ←→ to switch panels).
+func (m *Model) moveInPanel(move func(*table.Model)) {
+	src := m.focusedSource()
+	if src == "" {
 		return
 	}
-	if m.focus >= len(ps) {
-		m.focus = len(ps) - 1
-	}
-	src := ps[m.focus]
-	n := len(m.sourceRows(src))
-	c := m.panelCursor[src] + d
+	move(m.tableFor(src))
+	m.syncTable(src)
+}
 
-	switch {
-	case c < 0:
-		if m.canSpillUp() { // spill up to the previous panel
-			m.focus--
-			prev := ps[m.focus]
-			m.panelCursor[prev] = len(m.sourceRows(prev)) - 1
-			m.clampPanel(prev)
-			return
-		}
-		c = 0
-	case c >= n:
-		if m.canSpillDown() { // spill down to the next panel
-			m.focus++
-			next := ps[m.focus]
-			m.panelCursor[next] = 0
-			m.clampPanel(next)
-			return
-		}
-		c = n - 1
-	}
-	if c < 0 {
-		c = 0
-	}
-	m.panelCursor[src] = c
-	m.clampPanel(src)
+// setFocus moves the panel focus, resyncing the panels that gained and lost it so
+// the ▶ marker and border highlight track the change.
+func (m *Model) setFocus(i int) {
+	old := m.focusedSource()
+	m.focus = i
+	m.syncTable(old)
+	m.syncTable(m.focusedSource())
 }
 
 func (m Model) keyReviewing(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -411,7 +392,7 @@ func (m *Model) onChecked(msg checkedMsg) (tea.Model, tea.Cmd) {
 			m.selected[u.ID()] = !u.Pinned
 		}
 	}
-	m.clampAllPanels()
+	m.syncAllPanels()
 	return *m, waitForCheck(m.checkCh)
 }
 
@@ -435,20 +416,20 @@ func (m *Model) toggleCurrent() {
 	}
 	id := r.update.ID()
 	m.selected[id] = !m.selected[id]
+	m.syncTable(m.focusedSource()) // refresh the checkbox cell
 }
 
 // currentRow returns the row under the cursor in the focused panel.
 func (m Model) currentRow() (row, bool) {
-	ps := m.panels()
-	if len(ps) == 0 {
+	src := m.focusedSource()
+	if src == "" {
 		return row{}, false
 	}
-	f := m.focus
-	if f >= len(ps) {
-		f = len(ps) - 1
+	rs := m.sourceRows(src)
+	i := 0
+	if t := m.tables[src]; t != nil {
+		i = t.Cursor()
 	}
-	rs := m.sourceRows(ps[f])
-	i := m.panelCursor[ps[f]]
 	if i < 0 || i >= len(rs) {
 		return row{}, false
 	}
@@ -461,6 +442,9 @@ func (m *Model) setAll(v bool) {
 			continue
 		}
 		m.selected[r.update.ID()] = v
+	}
+	for _, s := range m.panelSources() {
+		m.syncTable(s) // refresh every checkbox cell
 	}
 }
 
@@ -508,6 +492,12 @@ func (m *Model) applyEvent(ev core.ProgressEvent) {
 		if ev.Item != "" {
 			st.item = ev.Item
 			st.markSeen(ev.Item)
+			if st.pkgFrac == nil {
+				st.pkgFrac = map[string]float64{}
+			}
+			if ev.Fraction > st.pkgFrac[ev.Item] {
+				st.pkgFrac[ev.Item] = ev.Fraction
+			}
 		}
 	case core.EventItemDone:
 		st.done++
