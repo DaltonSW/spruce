@@ -368,6 +368,14 @@ func (m *Model) syncTable(src string) {
 	t.SetHeight(rowCap + 1) // +1 for the table's (blank) header line
 
 	rs := m.sourceRows(src)
+	// A table synced while its backend still had 0 rows (e.g. during streaming
+	// discovery, before this backend's Check returns) gets its cursor driven to
+	// -1 by bubbles' SetRows underflow, and a later SetRows never lifts it back.
+	// A negative cursor makes UpdateViewport render one row short, clipping the
+	// last item until the user navigates. Restore it to the top once rows exist.
+	if t.Cursor() < 0 && len(rs) > 0 {
+		t.SetCursor(0)
+	}
 	focused := src == m.focusedSource()
 	cur := t.Cursor()
 	nameW, curW, newW, sizeW := panelColumns(rs, contentW)

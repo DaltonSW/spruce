@@ -260,6 +260,53 @@ func TestStreamingDiscovery(t *testing.T) {
 	}
 }
 
+// Regression: a small panel must show every one of its rows once its check
+// arrives, even though earlier checks (for other backends) synced it while it
+// still had zero rows. That empty sync used to leave the table's cursor at -1,
+// which clipped the last row until the user navigated into the panel.
+func TestStreamingFillShowsAllRows(t *testing.T) {
+	m := New(context.TODO(), func() {}, Options{})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(Model)
+
+	backends := []core.Backend{
+		fakeBackend{"system"}, fakeBackend{"brew"}, fakeBackend{"flatpak"}, fakeBackend{"snap"},
+	}
+	tm, _ := m.onAvailable(availableMsg{backends: backends})
+	m = tm.(Model)
+
+	// Checks stream in over time: an empty backend and a couple of others land
+	// before brew/flatpak, so their panels are synced while still empty first.
+	stream := []struct {
+		name string
+		n    int
+	}{{"snap", 0}, {"system", 12}, {"brew", 6}, {"flatpak", 3}}
+	for _, s := range stream {
+		ups := make([]core.Update, s.n)
+		for i := range ups {
+			ups[i] = core.Update{
+				Name:           fmt.Sprintf("%s-pkg-%03d", s.name, i),
+				CurrentVersion: "1.0.0", NewVersion: "1.0.1", Source: s.name,
+			}
+		}
+		tm, _ = m.onChecked(checkedMsg{result: checkResult{Backend: fakeBackend{s.name}, Updates: ups}})
+		m = tm.(Model)
+	}
+
+	body := m.viewSelecting()
+	for _, p := range []struct {
+		name string
+		n    int
+	}{{"brew", 6}, {"flatpak", 3}} {
+		for i := 0; i < p.n; i++ {
+			want := fmt.Sprintf("%s-pkg-%03d", p.name, i)
+			if !strings.Contains(body, want) {
+				t.Errorf("%s row %q missing — last rows clipped after streaming fill:\n%s", p.name, want, body)
+			}
+		}
+	}
+}
+
 // Review is a floating modal summarizing counts per backend; backends with
 // nothing selected are omitted, and the composited view still fits the terminal.
 func TestReviewModal(t *testing.T) {
