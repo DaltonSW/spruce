@@ -733,14 +733,14 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 	listH := contentH - barH
 
 	// The package list, scrolled so the active item stays in view.
-	nameW, curW, newW := applyColumns(pkgs, innerW)
+	nameW, curW, newW, sizeW := applyColumns(pkgs, innerW)
 	offset := 0
 	if total > listH {
 		offset = clampInt(activeRow(pkgs, st)-listH/2, 0, total-listH)
 	}
 	end := min(offset+listH, total)
 	for i := offset; i < end; i++ {
-		body = append(body, padRight(m.renderApplyRow(i, pkgs[i], st, nameW, curW, newW), innerW))
+		body = append(body, padRight(m.renderApplyRow(i, pkgs[i], st, nameW, curW, newW, sizeW, innerW), innerW))
 	}
 
 	// Short list: fill the gap above the bar with the backend's output tail.
@@ -786,9 +786,11 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 }
 
 // renderApplyRow draws one package line in an apply panel: a status icon, the
-// name, and its version bump. The active row carries a spinner and its current
-// phase/percentage so you can watch the work move down the list.
-func (m Model) renderApplyRow(i int, u core.Update, st *srcState, nameW, curW, newW int) string {
+// name, its version bump, and its download size. The active row carries a spinner
+// and a live note (phase + downloaded/size + percent) so you can watch the work
+// move down the list. The whole row is bounded to innerW so the note can't spill
+// past the border.
+func (m Model) renderApplyRow(i int, u core.Update, st *srcState, nameW, curW, newW, sizeW, innerW int) string {
 	status := pkgRowStatus(i, u.Name, st)
 	var icon string
 	switch status {
@@ -807,18 +809,41 @@ func (m Model) renderApplyRow(i int, u core.Update, st *srcState, nameW, curW, n
 	nv := truncate(displayVersion(u.NewVersion), newW)
 	line := fmt.Sprintf("%s %s  %s%s%s",
 		icon, name, dimStyle.Render(cur), dimStyle.Render(" → "), nv)
+	if sizeW > 0 {
+		line += "  " + dimStyle.Render(padLeft(truncate(formatBytes(u.SizeBytes), sizeW), sizeW))
+	}
 
-	// Annotate the in-flight package with what it's doing right now.
+	// Annotate the in-flight package with what it's doing right now, truncated to
+	// the width left in the panel so the styled note never overflows the border.
 	if status == statActive && st != nil {
-		note := st.phase
-		if frac := stFraction(st); frac > 0 {
-			note = strings.TrimSpace(fmt.Sprintf("%s %d%%", note, int(clamp01(frac)*100)))
-		}
-		if note != "" {
-			line += "  " + dimStyle.Render("· "+note)
+		if note := applyActiveNote(u, st); note != "" {
+			// "  · " is 4 visible cols of overhead before the (truncatable) note.
+			if avail := innerW - lipgloss.Width(line) - 4; avail > 0 {
+				line += "  " + dimStyle.Render("· "+truncate(note, avail))
+			}
 		}
 	}
 	return line
+}
+
+// applyActiveNote describes what the active package is doing: its phase, and —
+// when the backend reports numeric progress and the size is known — the live
+// downloaded/size and percent (downloaded ≈ fraction × size). With no numeric
+// progress (brew/flatpak report phase only) it falls back to just the phase, so
+// we never show a misleading 0%.
+func applyActiveNote(u core.Update, st *srcState) string {
+	note := st.phase
+	frac := clamp01(stFraction(st))
+	if frac <= 0 {
+		return note
+	}
+	pct := fmt.Sprintf("%d%%", int(frac*100))
+	if u.SizeBytes > 0 {
+		downloaded := int64(frac * float64(u.SizeBytes))
+		return strings.TrimSpace(fmt.Sprintf("%s %s/%s %s",
+			note, formatBytes(downloaded), formatBytes(u.SizeBytes), pct))
+	}
+	return strings.TrimSpace(note + " " + pct)
 }
 
 // applyBottomLine is the panel's summary footer: an error when failed, a done
@@ -840,9 +865,15 @@ func (m Model) applyBottomLine(st *srcState, done, total int, totalBytes int64, 
 			frac = (float64(done) + clamp01(stFraction(st))) / float64(total)
 		}
 		right := rateETA(st, frac, totalBytes)
+		// In a narrow panel there's no room for both; keep the full-width bar and
+		// drop the cluster (the header still carries the elapsed timer).
+		const minBar = 8
+		if right != "" && lipgloss.Width(right)+2+minBar > w {
+			right = ""
+		}
 		barW := w
 		if right != "" {
-			barW = max(w-lipgloss.Width(right)-2, 4)
+			barW = max(w-lipgloss.Width(right)-2, minBar)
 		}
 		bar := progressBar(frac, barW, st)
 		if right == "" {
@@ -872,9 +903,10 @@ func rateETA(st *srcState, frac float64, totalBytes int64) string {
 	return strings.Join(parts, " · ")
 }
 
-// applyColumns sizes the name / current / new columns for an apply panel,
-// reserving room for the leading status icon (1 col + space).
-func applyColumns(pkgs []core.Update, innerW int) (nameW, curW, newW int) {
+// applyColumns sizes the name / current / new / size columns for an apply panel,
+// reserving room for the leading status icon (1 col + space). The size column is
+// dropped when there isn't room for it alongside a readable name.
+func applyColumns(pkgs []core.Update, innerW int) (nameW, curW, newW, sizeW int) {
 	const overhead = 1 + 1 + 2 + 3 // icon, space, gap, " → "
 	for _, u := range pkgs {
 		if w := lipgloss.Width(u.Name); w > nameW {
@@ -886,13 +918,27 @@ func applyColumns(pkgs []core.Update, innerW int) (nameW, curW, newW int) {
 		if w := lipgloss.Width(displayVersion(u.NewVersion)); w > newW {
 			newW = w
 		}
+		if u.SizeBytes > 0 {
+			if w := lipgloss.Width(formatBytes(u.SizeBytes)); w > sizeW {
+				sizeW = w
+			}
+		}
 	}
 	curW = min(curW, 10)
 	newW = min(newW, 12)
+	sizeW = min(sizeW, 9)
 
+	sizeCol := 0
+	if sizeW > 0 {
+		sizeCol = 2 + sizeW // "  24 MB"
+	}
 	avail := max(innerW-overhead, 6)
-	nameW = max(min(nameW, avail-curW-newW), 4)
-	return nameW, curW, newW
+	// Drop the size column rather than crush the name to fit it.
+	if sizeW > 0 && avail-curW-newW-sizeCol < 6 {
+		sizeW, sizeCol = 0, 0
+	}
+	nameW = max(min(nameW, avail-curW-newW-sizeCol), 4)
+	return nameW, curW, newW, sizeW
 }
 
 // clampInt constrains v to [lo, hi]; if the range is empty, lo wins.

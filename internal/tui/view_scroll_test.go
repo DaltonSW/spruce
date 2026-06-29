@@ -299,8 +299,9 @@ func TestPkgRowStatus(t *testing.T) {
 }
 
 // Download sizes flow through to the selecting status line, the review modal
-// (per backend + grand total), and the live apply footer (downloaded/total +
-// rate + ETA), and the apply header carries an elapsed timer.
+// (per backend + grand total), the per-package apply rows, the active row's live
+// downloaded/size note, and the apply footer (rate + ETA); the apply header
+// carries an elapsed timer.
 func TestSizeAndTimingDisplay(t *testing.T) {
 	m := gridModel(map[string]int{"system": 6, "brew": 2})
 	for i := range m.rows {
@@ -323,17 +324,37 @@ func TestSizeAndTimingDisplay(t *testing.T) {
 		t.Errorf("review modal should summarize total download size:\n%s", mod)
 	}
 
-	// Apply: elapsed timer in the header, rate/ETA in the footer.
+	// Apply: per-row size, active-row live download note, header timer, footer ETA.
+	// Widen so the active row's full note fits (it truncates in narrow panels).
+	m.width = 160
 	m.state = stateApplying
-	st := &srcState{done: 3, fraction: 0.5}
+	sysPkgs := m.selectionByBackend()["system"]
+	st := &srcState{done: 3, fraction: 0.5, phase: "Downloading", item: sysPkgs[3].Name}
 	st.started = time.Now().Add(-10 * time.Second)
+	st.markSeen(sysPkgs[3].Name)
 	m.progress["system"] = st
 	app := m.viewApplying()
+	if !strings.Contains(app, "10 MB") {
+		t.Errorf("apply rows should show per-package size:\n%s", app)
+	}
+	if !strings.Contains(app, "5.0 MB/10 MB") { // downloaded(0.5×10MB)/size on the active row
+		t.Errorf("active row should show live downloaded/size:\n%s", app)
+	}
 	if !strings.Contains(app, "ETA") {
 		t.Errorf("apply footer should show an ETA when sizes are known:\n%s", app)
 	}
 	if !strings.Contains(app, "/s") {
 		t.Errorf("apply footer should show a download rate:\n%s", app)
+	}
+	// Nothing may spill past the terminal width — at this wide size and at a
+	// narrow two-panel size where the footer cluster and active note must shrink.
+	for _, w := range []int{160, 74} {
+		m.width = w
+		for i, ln := range strings.Split("spruce\n\n"+m.viewApplying(), "\n") {
+			if lw := lipgloss.Width(ln); lw > m.width {
+				t.Errorf("w=%d apply line %d width %d exceeds %d: %q", w, i, lw, m.width, ln)
+			}
+		}
 	}
 }
 
