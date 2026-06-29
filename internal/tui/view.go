@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/progress"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/dustin/go-humanize"
@@ -13,8 +15,6 @@ import (
 
 	"go.dalton.dog/spruce/internal/core"
 )
-
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // dimBorder is the resting border colour for an unfocused panel (xterm 240).
 // It anchors the loading gradient so the bright accents sweep over a dim base.
@@ -77,18 +77,14 @@ func (m Model) View() tea.View {
 	return v
 }
 
-// spin advances every 3rd tick so the braille spinner stays at ~10fps even
-// though the tick loop runs at 30fps for a smooth gradient border.
-func (m Model) spin() string { return spinnerFrames[(m.spinner/3)%len(spinnerFrames)] }
-
 func (m Model) viewDiscovering() string {
-	return fmt.Sprintf("%s Looking for available package managers…", m.spin())
+	return fmt.Sprintf("%s Looking for available package managers…", m.spinner.View())
 }
 
 func (m Model) viewSelecting() string {
 	if len(m.panelSources()) == 0 {
 		return dimStyle.Render("No supported package managers found.") + "\n\n" +
-			helpStyle.Render("q quit")
+			m.help.ShortHelpView([]key.Binding{m.keys.Quit})
 	}
 
 	ps := m.panels()
@@ -107,12 +103,11 @@ func (m Model) viewSelecting() string {
 		status += dimStyle.Render("  ·  " + formatBytes(b) + " to download")
 	}
 	if n := len(m.checking); n > 0 {
-		status += dimStyle.Render(fmt.Sprintf("  ·  %s checking %d…", m.spin(), n))
+		status += dimStyle.Render(fmt.Sprintf("  ·  %s checking %d…", m.spinner.View(), n))
 	}
 	status += m.dryRunBadge()
 	b.WriteString(status + "\n")
-	b.WriteString(helpStyle.Render(
-		"↑/↓ move · ←/→/tab panel · space toggle · a all · N none · d dry-run · enter review · q quit"))
+	b.WriteString(m.help.ShortHelpView(m.keys.selectingHelp()))
 	return b.String()
 }
 
@@ -254,7 +249,7 @@ func (m Model) renderPanel(src string, totalW, totalH int, focused bool) string 
 	// Header: "SYSTEM  3/210"; while checking, a spinner stands in for the count.
 	right := fmt.Sprintf(" %d/%d", sel, len(rs))
 	if checking {
-		right = " " + m.spin()
+		right = " " + m.spinner.View()
 	}
 	title := truncate(strings.ToUpper(src), max(innerW-lipgloss.Width(right), 1))
 	header := padRight(groupStyle.Render(title)+dimStyle.Render(right), innerW)
@@ -265,7 +260,7 @@ func (m Model) renderPanel(src string, totalW, totalH int, focused bool) string 
 	contentH := max(innerH-1, 1)
 	switch {
 	case checking:
-		fillCentered(&lines, contentH, innerW, dimStyle.Render(m.spin()+" checking for updates…"))
+		fillCentered(&lines, contentH, innerW, dimStyle.Render(m.spinner.View()+" checking for updates…"))
 	case errored:
 		fillCentered(&lines, contentH, innerW, errStyle.Render(truncate("✗ "+errText, max(innerW-2, 1))))
 	case len(rs) == 0:
@@ -301,7 +296,7 @@ func (m Model) renderPanel(src string, totalW, totalH int, focused bool) string 
 	// While checking, draw a gradient border whose phase rotates each tick;
 	// otherwise a solid border (pink when focused, dim otherwise).
 	if checking {
-		return gradientBox(lines, innerW, innerH, float64(m.spinner)*0.03)
+		return gradientBox(lines, innerW, innerH, float64(m.tick)*0.03)
 	}
 	return solidBox(lines, focused)
 }
@@ -454,36 +449,43 @@ func panelColumns(rs []row, innerW int) (nameW, curW, newW, sizeW int) {
 			pinSlack = 6 // " (pin)"
 		}
 	}
-	// Cap generously: flatpak versions now carry a disambiguating " (commit)"
-	// suffix, and some refs (e.g. freedesktop-sdk-…) are long. The data-driven
-	// width means short versions still stay compact.
-	curW = min(curW, 24)
-	newW = min(newW, 24)
+	// Cap version columns: flatpak versions can carry a " (commit)" suffix, but
+	// the name is what identifies the package, so we keep these bounded and let
+	// the shrink loop below trim them before the name. The data-driven width
+	// means short versions still stay compact.
+	curW = min(curW, 18)
+	newW = min(newW, 18)
 	sizeW = min(sizeW, 9)
 
-	sizeCol := 0
-	if sizeW > 0 {
-		sizeCol = 2 + sizeW // "  142 MB"
+	sizeCol := func() int {
+		if sizeW > 0 {
+			return 2 + sizeW // "  142 MB"
+		}
+		return 0
 	}
 	avail := max(innerW-overhead-pinSlack, 6)
-	// Drop the size column rather than crush the name to fit it.
-	if sizeW > 0 && avail-curW-newW-sizeCol < 6 {
-		sizeW, sizeCol = 0, 0
-	}
-	avail -= sizeCol
 
-	nameW = min(nameW, avail-curW-newW)
-	if nameW < 4 {
-		nameW = 4
-		// Shrink versions (new first, then current) to make room.
-		if d := nameW + curW + newW - avail; d > 0 {
-			if newW-d >= 3 {
-				newW -= d
-			} else {
-				d -= newW - 3
-				newW = 3
-				curW = max(curW-d, 3)
-			}
+	// Shrink to fit, dropping the least-missed information first: the size
+	// column, then the version columns down to a usable floor, and only then
+	// the name. This keeps package names readable on narrow panels.
+	for nameW+curW+newW+sizeCol() > avail {
+		switch {
+		case sizeW > 0:
+			sizeW = 0
+		case curW > 6:
+			curW--
+		case newW > 6:
+			newW--
+		case nameW > 12:
+			nameW--
+		case curW > 3:
+			curW--
+		case newW > 3:
+			newW--
+		case nameW > 4:
+			nameW--
+		default:
+			return nameW, curW, newW, sizeW // can't shrink further
 		}
 	}
 	return nameW, curW, newW, sizeW
@@ -545,7 +547,7 @@ func (m Model) reviewModal() string {
 		}
 		body = append(body, "", summary)
 	}
-	body = append(body, "", helpStyle.Render("enter/y apply   ·   d dry run   ·   esc cancel"))
+	body = append(body, "", m.help.ShortHelpView(m.keys.reviewingHelp()))
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -608,16 +610,16 @@ func (m Model) viewApplying() string {
 	}
 	status := dimStyle.Render(fmt.Sprintf("%d of %d package managers finished", done, total))
 	if m.state != stateDone {
-		status = dimStyle.Render(fmt.Sprintf("%s applying  ·  %s", m.spin(),
+		status = dimStyle.Render(fmt.Sprintf("%s applying  ·  %s", m.spinner.View(),
 			fmt.Sprintf("%d of %d package managers finished", done, total)))
 	}
 	status += m.dryRunBadge()
 	b.WriteString(status + "\n")
 
 	if m.state == stateDone {
-		b.WriteString(helpStyle.Render("q/enter quit"))
+		b.WriteString(m.help.ShortHelpView(m.keys.doneHelp()))
 	} else {
-		b.WriteString(helpStyle.Render("ctrl+c cancel"))
+		b.WriteString(m.help.ShortHelpView(m.keys.applyingHelp()))
 	}
 	return b.String()
 }
@@ -781,7 +783,7 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 	case m.state == stateDone:
 		return solidBoxColor(lines, "240")
 	default:
-		return gradientBox(lines, innerW, innerH, float64(m.spinner)*0.03)
+		return gradientBox(lines, innerW, innerH, float64(m.tick)*0.03)
 	}
 }
 
@@ -797,7 +799,7 @@ func (m Model) renderApplyRow(i int, u core.Update, st *srcState, nameW, curW, n
 	case statDone:
 		icon = okStyle.Render("✓")
 	case statActive:
-		icon = cursorStyle.Render(m.spin())
+		icon = cursorStyle.Render(m.spinner.View())
 	case statFailed:
 		icon = errStyle.Render("✗")
 	default:
@@ -924,20 +926,39 @@ func applyColumns(pkgs []core.Update, innerW int) (nameW, curW, newW, sizeW int)
 			}
 		}
 	}
-	curW = min(curW, 10)
-	newW = min(newW, 12)
+	curW = min(curW, 18)
+	newW = min(newW, 18)
 	sizeW = min(sizeW, 9)
 
-	sizeCol := 0
-	if sizeW > 0 {
-		sizeCol = 2 + sizeW // "  24 MB"
+	sizeCol := func() int {
+		if sizeW > 0 {
+			return 2 + sizeW // "  24 MB"
+		}
+		return 0
 	}
 	avail := max(innerW-overhead, 6)
-	// Drop the size column rather than crush the name to fit it.
-	if sizeW > 0 && avail-curW-newW-sizeCol < 6 {
-		sizeW, sizeCol = 0, 0
+
+	// Same priority as panelColumns: trim size, then versions, then the name.
+	for nameW+curW+newW+sizeCol() > avail {
+		switch {
+		case sizeW > 0:
+			sizeW = 0
+		case curW > 6:
+			curW--
+		case newW > 6:
+			newW--
+		case nameW > 12:
+			nameW--
+		case curW > 3:
+			curW--
+		case newW > 3:
+			newW--
+		case nameW > 4:
+			nameW--
+		default:
+			return nameW, curW, newW, sizeW
+		}
 	}
-	nameW = max(min(nameW, avail-curW-newW-sizeCol), 4)
 	return nameW, curW, newW, sizeW
 }
 
@@ -979,23 +1000,29 @@ func padLeft(s string, w int) string {
 	return s
 }
 
-// progressBar renders a [████░░░░] bar of the given width for fraction f.
+// progressBar renders a [████░░░░] bar of the given width for fraction f, using
+// the bubbles progress component. The fill colour reflects state (blue active,
+// green finished, red failed) and the empty track stays dim, matching the look
+// the hand-rolled bar had.
 func progressBar(f float64, w int, st *srcState) string {
 	if w < 4 {
 		return strings.Repeat(" ", max(w, 0))
 	}
-	f = clamp01(f)
-	fill := int(f * float64(w))
-	color := lipgloss.Color("75")
+	fill := lipgloss.Color("75")
 	switch {
 	case st != nil && st.failed:
-		color = lipgloss.Color("203")
+		fill = lipgloss.Color("203")
 	case st != nil && st.finished:
-		color = lipgloss.Color("78")
+		fill = lipgloss.Color("78")
 	}
-	bar := lipgloss.NewStyle().Foreground(color).Render(strings.Repeat("█", fill))
-	rest := dimStyle.Render(strings.Repeat("░", w-fill))
-	return bar + rest
+	bar := progress.New(
+		progress.WithoutPercentage(),
+		progress.WithFillCharacters('█', '░'),
+		progress.WithWidth(w),
+	)
+	bar.FullColor = fill
+	bar.EmptyColor = lipgloss.Color("244") // matches dimStyle
+	return bar.ViewAs(clamp01(f))
 }
 
 func stFraction(st *srcState) float64 {

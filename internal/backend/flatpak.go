@@ -69,14 +69,15 @@ func (Flatpak) Check(ctx context.Context) ([]core.Update, error) {
 			}
 			// Flatpak's version field often doesn't change between releases —
 			// the real difference is the commit. When the version strings would
-			// be identical (or are absent), fall back to the short commit so the
-			// two columns actually differ and convey something.
+			// be identical (or are absent), fall back to the commit so the two
+			// columns differ. To avoid burning width repeating the same version
+			// on both sides, show it once (with the from-commit) on the left and
+			// only the to-commit on the right: "1.2 (aaaaaaa) → bbbbbbb".
 			if u.NewVersion == u.CurrentVersion {
-				if c := shortCommit(cur.commit); c != "" {
-					u.CurrentVersion = joinVersionCommit(u.CurrentVersion, c)
-				}
-				if c := shortCommit(newCommit); c != "" {
-					u.NewVersion = joinVersionCommit(u.NewVersion, c)
+				from, to := shortCommit(cur.commit), shortCommit(newCommit)
+				u.CurrentVersion = joinVersionCommit(u.CurrentVersion, from)
+				if to != "" {
+					u.NewVersion = to
 				}
 			}
 			key := u.Name + "@" + u.Repo

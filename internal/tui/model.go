@@ -6,6 +6,9 @@ import (
 	"context"
 	"time"
 
+	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
 	"go.dalton.dog/spruce/internal/core"
@@ -85,6 +88,10 @@ type Model struct {
 	state         state
 	width, height int
 
+	keys    keyMap
+	help    help.Model
+	spinner spinner.Model // braille activity spinner (bubbles)
+
 	// Discovery results, keyed for Apply routing.
 	byName map[string]core.Backend
 	errs   map[string]string // backend name -> Check error
@@ -110,8 +117,9 @@ type Model struct {
 	demo    bool // --demo: use fake backends, no real system access
 	dryRun  bool // --dry-run: simulate the apply, mutating nothing
 
-	spinner int
-	ticking bool // whether a spinner tick loop is currently running
+	tick     int  // monotonic 30fps counter driving the gradient border phase
+	ticking  bool // whether the gradient tick loop is currently running
+	spinning bool // whether the braille spinner's tick loop is currently running
 }
 
 // Options carries the CLI flags that shape a run.
@@ -124,10 +132,26 @@ type Options struct {
 // New builds the initial model. ctx is cancelled when the user quits, which
 // aborts any in-flight backend work.
 func New(ctx context.Context, cancel context.CancelFunc, opts Options) Model {
+	h := help.New()
+	h.ShortSeparator = " · " // match the footer joiner the TUI has always used
+	// Render the whole footer in one uniform dim grey, as the literal help
+	// strings did, rather than the bubble's brighter key/dimmer desc default.
+	h.Styles.ShortKey = helpStyle
+	h.Styles.ShortDesc = helpStyle
+	h.Styles.ShortSeparator = helpStyle
+
+	sp := spinner.New(spinner.WithSpinner(spinner.Spinner{
+		Frames: []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
+		FPS:    time.Second / 10,
+	}))
+
 	return Model{
 		ctx:         ctx,
 		cancel:      cancel,
 		state:       stateDiscovering,
+		keys:        defaultKeys(),
+		help:        h,
+		spinner:     sp,
 		byName:      map[string]core.Backend{},
 		errs:        map[string]string{},
 		checking:    map[string]bool{},
@@ -138,12 +162,19 @@ func New(ctx context.Context, cancel context.CancelFunc, opts Options) Model {
 		autoYes:     opts.AutoYes,
 		demo:        opts.Demo,
 		dryRun:      opts.DryRun,
-		ticking:     true, // Init starts a tick loop
+		ticking:     true, // Init starts the gradient tick loop
+		spinning:    true, // Init starts the spinner tick loop
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(availableCmd(m.demo), tickCmd())
+	return tea.Batch(availableCmd(m.demo), tickCmd(), m.spinner.Tick)
+}
+
+// animating reports whether anything on screen needs the spinner/gradient
+// ticking: discovery, an in-flight Check, or an apply in progress.
+func (m Model) animating() bool {
+	return m.state == stateDiscovering || m.state == stateApplying || len(m.checking) > 0
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -151,6 +182,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.help.SetWidth(msg.Width)
 		m.clampAllPanels()
 		return m, nil
 
@@ -158,12 +190,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case tickMsg:
-		m.spinner++
-		if m.state == stateDiscovering || m.state == stateApplying || len(m.checking) > 0 {
+		m.tick++
+		if m.animating() {
 			return m, tickCmd()
 		}
 		m.ticking = false
 		return m, nil
+
+	case spinner.TickMsg:
+		if !m.animating() {
+			m.spinning = false // let the spinner loop die while idle
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
 
 	case availableMsg:
 		return m.onAvailable(msg)
@@ -195,8 +236,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c":
+	if key.Matches(msg, m.keys.Cancel) {
 		m.cancel()
 		return m, tea.Quit
 	}
@@ -207,8 +247,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case stateReviewing:
 		return m.keyReviewing(msg)
 	case stateDone:
-		switch msg.String() {
-		case "q", "enter", "esc":
+		if key.Matches(msg, m.keys.QuitDone) {
 			return m, tea.Quit
 		}
 	}
@@ -216,37 +255,37 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) keySelecting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "q":
+	switch {
+	case key.Matches(msg, m.keys.Quit):
 		m.cancel()
 		return m, tea.Quit
-	case "up", "k":
+	case key.Matches(msg, m.keys.Up):
 		m.moveCursor(-1)
-	case "down", "j":
+	case key.Matches(msg, m.keys.Down):
 		m.moveCursor(1)
-	case "left", "h":
+	case key.Matches(msg, m.keys.Left):
 		m.focus = 0
-	case "right", "l":
+	case key.Matches(msg, m.keys.Right):
 		if len(m.panels()) > 1 && m.focus == 0 {
 			m.focus = 1
 		}
-	case "tab":
+	case key.Matches(msg, m.keys.Tab):
 		if n := len(m.panels()); n > 0 {
 			m.focus = (m.focus + 1) % n
 		}
-	case "shift+tab":
+	case key.Matches(msg, m.keys.ShiftTab):
 		if n := len(m.panels()); n > 0 {
 			m.focus = (m.focus - 1 + n) % n
 		}
-	case " ":
+	case key.Matches(msg, m.keys.Toggle):
 		m.toggleCurrent()
-	case "a":
+	case key.Matches(msg, m.keys.All):
 		m.setAll(true)
-	case "N":
+	case key.Matches(msg, m.keys.None):
 		m.setAll(false)
-	case "d":
+	case key.Matches(msg, m.keys.DryRun):
 		m.dryRun = !m.dryRun
-	case "enter":
+	case key.Matches(msg, m.keys.Review):
 		if m.anySelected() {
 			m.state = stateReviewing
 		}
@@ -297,29 +336,36 @@ func (m *Model) moveCursor(d int) {
 }
 
 func (m Model) keyReviewing(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc", "b", "n":
+	switch {
+	case key.Matches(msg, m.keys.Back):
 		m.state = stateSelecting
-	case "d":
+	case key.Matches(msg, m.keys.DryRun):
 		m.dryRun = !m.dryRun
-	case "y", "enter":
+	case key.Matches(msg, m.keys.Apply):
 		m.state = stateApplying
 		return m, tea.Batch(startApplyCmd(m.ctx, m.selectionByBackend(), m.byName, m.dryRun), m.ensureTick())
-	case "q", "ctrl+c":
+	case key.Matches(msg, m.keys.Quit):
 		m.cancel()
 		return m, tea.Quit
 	}
 	return m, nil
 }
 
-// ensureTick starts the spinner tick loop if it isn't already running, so we
-// never stack two loops (which would animate at double speed).
+// ensureTick restarts the animation loops (gradient border + braille spinner) if
+// they aren't already running — each loop halts itself when nothing is animating,
+// so this is called whenever we re-enter an animating state (e.g. starting an
+// apply). The per-loop guards stop us stacking two loops (double-speed animation).
 func (m *Model) ensureTick() tea.Cmd {
-	if m.ticking {
-		return nil
+	var cmds []tea.Cmd
+	if !m.ticking {
+		m.ticking = true
+		cmds = append(cmds, tickCmd())
 	}
-	m.ticking = true
-	return tickCmd()
+	if !m.spinning {
+		m.spinning = true
+		cmds = append(cmds, m.spinner.Tick)
+	}
+	return tea.Batch(cmds...)
 }
 
 // onAvailable records every detected backend and shows their panels right away
