@@ -92,7 +92,8 @@ func (m Model) viewSelecting() string {
 	if m.focus >= 0 && m.focus < len(ps) {
 		focusedSrc = ps[m.focus]
 	}
-	grid := renderColumns(ps, m.width, m.selectAvailHeight(), func(src string, w, h int) string {
+	heights := panelLayout(m.panelContentLines(), m.selectAvailHeight())
+	grid := renderStack(ps, m.width, heights, func(src string, w, h int) string {
 		return m.renderPanel(src, w, h, src == focusedSrc)
 	})
 
@@ -122,9 +123,9 @@ func (m Model) panelSources() []string {
 }
 
 // panels returns the backends to render, in display order. Available() yields
-// the system backend (PackageKit, the big one) first, so it lands in the tall
-// left column with the rest stacked on the right. Using this fixed order rather
-// than a live row-count keeps the layout stable while results stream in.
+// the system backend (PackageKit, the big one) first, so it sits at the top of
+// the stack and gets the tallest panel. Using this fixed order rather than a
+// live row-count keeps the layout stable while results stream in.
 func (m Model) panels() []string {
 	return m.panelSources()
 }
@@ -168,24 +169,87 @@ func (m Model) selectAvailHeight() int {
 	return max(m.height-4, 6)
 }
 
+// minStackPanelH is the floor a panel can shrink to: a border (2) plus a header
+// and one content row.
+const minStackPanelH = 4
+
+// panelLayout returns the total (bordered) height of each panel, in order, given
+// the content lines each one wants (its update count, or 1 for a
+// checking/errored/up-to-date panel). Each panel is sized to its content —
+// border + header + content — so a backend with a single update doesn't sprawl.
+// When the panels' natural heights don't all fit in availH, the tallest panels
+// shrink first (never below the floor) so the big system list scrolls while the
+// small panels stay whole. If everything fits, the stack is shorter than availH
+// and leaves blank space below rather than padding panels out.
+func panelLayout(content []int, availH int) []int {
+	heights := make([]int, len(content))
+	total := 0
+	for i, c := range content {
+		heights[i] = max(c+3, minStackPanelH) // 2 border + 1 header + content
+		total += heights[i]
+	}
+
+	// Reclaim the overflow by trimming the tallest panel one row at a time until
+	// everything fits or nothing can shrink further.
+	for total > availH {
+		tallest := -1
+		for i, h := range heights {
+			if h > minStackPanelH && (tallest < 0 || h > heights[tallest]) {
+				tallest = i
+			}
+		}
+		if tallest < 0 {
+			break // all at the floor; the stack overflows the screen
+		}
+		heights[tallest]--
+		total--
+	}
+	return heights
+}
+
 // panelTotalHeight is the bordered height (rows incl. border) of one panel.
 func (m Model) panelTotalHeight(src string) int {
 	ps := m.panels()
-	availH := m.selectAvailHeight()
-	if len(ps) <= 1 || src == ps[0] {
-		return availH // single, or the tall left column
-	}
-	rights := ps[1:]
-	base, rem := availH/len(rights), availH%len(rights)
-	for i, s := range rights {
+	heights := panelLayout(m.panelContentLines(), m.selectAvailHeight())
+	for i, s := range ps {
 		if s == src {
-			if i < rem {
-				return base + 1
-			}
-			return base
+			return heights[i]
 		}
 	}
-	return base
+	if len(heights) > 0 {
+		return heights[0]
+	}
+	return m.selectAvailHeight()
+}
+
+// panelContentLines is the number of content lines each panel (in panels()
+// order) wants, excluding its border and header: the backend's update count, or
+// a single line for a checking, errored, or up-to-date panel.
+func (m Model) panelContentLines() []int {
+	ps := m.panels()
+	out := make([]int, len(ps))
+	for i, s := range ps {
+		_, errored := m.errs[s]
+		switch {
+		case m.checking[s] || errored:
+			out[i] = 1
+		default:
+			out[i] = max(len(m.sourceRows(s)), 1)
+		}
+	}
+	return out
+}
+
+// panelRows splits a panel's content area (contentH lines, header already
+// excluded) into the row capacity and whether the scroll status line is shown.
+// The status line is reserved only when the list overflows AND there's room for
+// at least one row alongside it; in a one-line content area the row wins, so a
+// tiny panel never renders past its bounds.
+func panelRows(rowCount, contentH int) (rowCap int, showStatus bool) {
+	if rowCount > contentH && contentH >= 2 {
+		return contentH - 1, true
+	}
+	return contentH, false
 }
 
 // panelRowCap is how many package rows fit in a panel's inner area, reserving a
@@ -193,10 +257,8 @@ func (m Model) panelTotalHeight(src string) int {
 func (m Model) panelRowCap(src string) int {
 	innerH := max(m.panelTotalHeight(src)-2, 1) // minus top/bottom border
 	contentH := max(innerH-1, 1)                // minus header
-	if len(m.sourceRows(src)) > contentH {
-		return max(contentH-1, 1) // reserve the "↑/↓" status line
-	}
-	return contentH
+	cap, _ := panelRows(len(m.sourceRows(src)), contentH)
+	return cap
 }
 
 // clampPanel keeps a panel's cursor in range and scrolled into view.
@@ -267,11 +329,7 @@ func (m Model) renderPanel(src string, totalW, totalH int, focused bool) string 
 		// Detected but nothing to upgrade: show the box with a reassuring note.
 		fillCentered(&lines, contentH, innerW, okStyle.Render("Everything up-to-date!"))
 	default:
-		overflow := len(rs) > contentH
-		rowCap := contentH
-		if overflow {
-			rowCap = max(contentH-1, 1)
-		}
+		rowCap, showStatus := panelRows(len(rs), contentH)
 
 		offset := m.panelOffset[src]
 		if offset < 0 || offset >= len(rs) {
@@ -287,7 +345,7 @@ func (m Model) renderPanel(src string, totalW, totalH int, focused bool) string 
 		for k := end - offset; k < rowCap; k++ {
 			lines = append(lines, padRight("", innerW))
 		}
-		if overflow {
+		if showStatus {
 			status := fmt.Sprintf("  ↑ %d   ↓ %d", offset, len(rs)-end)
 			lines = append(lines, padRight(dimStyle.Render(status), innerW))
 		}
@@ -313,31 +371,17 @@ func solidBox(content []string, focused bool) string {
 	return border.Render(strings.Join(content, "\n"))
 }
 
-// renderColumns lays panels out as a grid: the first source fills the tall left
-// column, the rest stack on the right. render draws one panel at a given size.
-func renderColumns(sources []string, totalW, availH int, render func(src string, w, h int) string) string {
+// renderStack lays panels out as a single full-width vertical stack at the given
+// per-panel heights (from panelLayout). render draws one panel at a given size.
+func renderStack(sources []string, totalW int, heights []int, render func(src string, w, h int) string) string {
 	if totalW <= 0 {
 		totalW = 80
 	}
-	if len(sources) == 1 {
-		return render(sources[0], totalW, availH)
+	boxes := make([]string, len(sources))
+	for i, s := range sources {
+		boxes[i] = render(s, totalW, heights[i])
 	}
-	leftW := totalW / 2
-	rightW := totalW - leftW - 1 // 1-col gap
-	left := render(sources[0], leftW, availH)
-
-	rights := sources[1:]
-	boxes := make([]string, len(rights))
-	base, rem := availH/len(rights), availH%len(rights)
-	for i, s := range rights {
-		h := base
-		if i < rem {
-			h++
-		}
-		boxes[i] = render(s, rightW, h)
-	}
-	right := lipgloss.JoinVertical(lipgloss.Left, boxes...)
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right)
+	return lipgloss.JoinVertical(lipgloss.Left, boxes...)
 }
 
 // gradientBox wraps content (exactly innerH lines, each innerW wide) in a
@@ -595,7 +639,14 @@ func (m Model) viewApplying() string {
 		return dimStyle.Render("Nothing to apply.") + "\n\n" + helpStyle.Render("q quit")
 	}
 
-	grid := renderColumns(srcs, m.width, m.selectAvailHeight(), func(src string, w, h int) string {
+	// Each apply panel is sized to the number of packages it's applying.
+	sel := m.selectionByBackend()
+	content := make([]int, len(srcs))
+	for i, s := range srcs {
+		content[i] = max(len(sel[s]), 1)
+	}
+	heights := panelLayout(content, m.selectAvailHeight())
+	grid := renderStack(srcs, m.width, heights, func(src string, w, h int) string {
 		return m.renderApplyPanel(src, w, h)
 	})
 

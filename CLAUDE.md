@@ -48,8 +48,12 @@ inside a backend implementation.
   so their progress output can be parsed into `ProgressEvent`s.
 - `internal/tui` — Bubble Tea v2 model/view. State machine:
   `Discovering → Selecting → Reviewing → Applying → Done` (`state` enum in
-  `model.go`). Each backend renders as its own always-visible panel with
-  panel-local navigation, so a 200-package system list can't bury smaller backends.
+  `model.go`). Each backend renders as its own always-visible panel, stacked
+  vertically at full terminal width, with the cursor spilling continuously
+  between panels — so a 200-package system list can't bury smaller backends.
+  `panelLayout` (`view.go`) sizes each panel to its content; when the panels'
+  natural heights overflow the screen the tallest (the system list) shrinks and
+  scrolls first, leaving the small backends whole.
 - `internal/cli` — fang/cobra command tree; root launches the TUI. `version` is
   stamped via `-ldflags "-X go.dalton.dog/spruce/internal/cli.version=..."`.
 

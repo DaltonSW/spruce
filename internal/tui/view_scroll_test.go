@@ -80,6 +80,83 @@ func TestSelectingFitsTerminal(t *testing.T) {
 	}
 }
 
+// panelLayout sizes each panel to its content; only when the naturals overflow
+// does the tallest (the big system list) shrink, leaving the small panels whole.
+func TestPanelLayoutContentSized(t *testing.T) {
+	// Everything fits: each panel is exactly border(2)+header(1)+content.
+	if got := panelLayout([]int{8, 1, 3}, 40); !equalInts(got, []int{11, 4, 6}) {
+		t.Errorf("fitting layout = %v, want [11 4 6]", got)
+	}
+
+	// Overflow: small panels stay at their natural height, the big one absorbs
+	// the shrink, and the heights sum to exactly availH.
+	got := panelLayout([]int{200, 1, 4}, 30)
+	if sum(got) != 30 {
+		t.Errorf("overflow layout %v sums to %d, want 30", got, sum(got))
+	}
+	if got[1] != 4 || got[2] != 7 {
+		t.Errorf("small panels shrank: got %v, want brew=4 flatpak=7", got)
+	}
+	if got[0] <= got[2] {
+		t.Errorf("system panel %d should still be the tallest in %v", got[0], got)
+	}
+}
+
+func sum(xs []int) int {
+	t := 0
+	for _, x := range xs {
+		t += x
+	}
+	return t
+}
+
+func equalInts(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Panels stack vertically at full width: the render fits the terminal, keeps
+// every panel visible, and lets the cursor move continuously from the system
+// panel down through the smaller ones (spill across all panels).
+func TestStackedLayout(t *testing.T) {
+	m := gridModel(map[string]int{"system": 220, "brew": 6, "flatpak": 3, "snap": 2})
+	// Resize through Update so the help footer width is set like the real app.
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 50, Height: 40})
+	m = updated.(Model)
+
+	full := "spruce\n\n" + m.viewSelecting()
+	lines := strings.Split(full, "\n")
+	if len(lines) > m.height {
+		t.Errorf("%d lines exceeds height %d", len(lines), m.height)
+	}
+	for i, ln := range lines {
+		if w := lipgloss.Width(ln); w > m.width {
+			t.Errorf("line %d width %d exceeds %d: %q", i, w, m.width, ln)
+		}
+	}
+	for _, want := range []string{"SYSTEM", "BREW", "FLATPAK", "SNAP"} {
+		if !strings.Contains(full, want) {
+			t.Errorf("panel %q not visible in stacked layout:\n%s", want, full)
+		}
+	}
+
+	// Down past the end of the system list must spill into the next panel, not
+	// stick on the system panel — the stack reads as one continuous list.
+	m.focus = 0
+	m.panelCursor["system"] = len(m.sourceRows("system")) - 1
+	m.moveCursor(1)
+	if m.focus == 0 {
+		t.Errorf("cursor did not spill out of the system panel when stacked")
+	}
+}
+
 // A backend that was detected but has no updates still gets a panel, showing
 // the up-to-date note.
 func TestEmptyBackendShowsPanel(t *testing.T) {

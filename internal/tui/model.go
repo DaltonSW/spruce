@@ -264,10 +264,12 @@ func (m Model) keySelecting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Down):
 		m.moveCursor(1)
 	case key.Matches(msg, m.keys.Left):
-		m.focus = 0
+		if m.focus > 0 {
+			m.focus--
+		}
 	case key.Matches(msg, m.keys.Right):
-		if len(m.panels()) > 1 && m.focus == 0 {
-			m.focus = 1
+		if m.focus < len(m.panels())-1 {
+			m.focus++
 		}
 	case key.Matches(msg, m.keys.Tab):
 		if n := len(m.panels()); n > 0 {
@@ -293,9 +295,19 @@ func (m Model) keySelecting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// moveCursor moves the cursor within the focused panel. In the right-hand
-// column (focus >= 1) it spills into the adjacent stacked panel at the edges, so
-// the right side reads as one continuous list.
+// canSpillUp / canSpillDown report whether moving the cursor past a panel's edge
+// should carry focus into the adjacent panel. Panels stack as one continuous
+// vertical column, so spill applies across all of them.
+func (m Model) canSpillUp() bool {
+	return m.focus > 0
+}
+
+func (m Model) canSpillDown() bool {
+	return m.focus < len(m.panels())-1
+}
+
+// moveCursor moves the cursor within the focused panel, spilling into the
+// adjacent panel at the edges so the whole stack reads as one continuous list.
 func (m *Model) moveCursor(d int) {
 	ps := m.panels()
 	if len(ps) == 0 {
@@ -310,7 +322,7 @@ func (m *Model) moveCursor(d int) {
 
 	switch {
 	case c < 0:
-		if m.focus > 1 { // spill up to previous right-column panel
+		if m.canSpillUp() { // spill up to the previous panel
 			m.focus--
 			prev := ps[m.focus]
 			m.panelCursor[prev] = len(m.sourceRows(prev)) - 1
@@ -319,7 +331,7 @@ func (m *Model) moveCursor(d int) {
 		}
 		c = 0
 	case c >= n:
-		if m.focus >= 1 && m.focus < len(ps)-1 { // spill down to next right panel
+		if m.canSpillDown() { // spill down to the next panel
 			m.focus++
 			next := ps[m.focus]
 			m.panelCursor[next] = 0
