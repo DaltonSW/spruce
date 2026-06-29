@@ -247,7 +247,7 @@ func (m *Model) moveCursor(d int) {
 
 func (m Model) keyReviewing(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "b":
+	case "esc", "b", "n":
 		m.state = stateSelecting
 	case "y", "enter":
 		m.state = stateApplying

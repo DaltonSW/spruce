@@ -2,15 +2,31 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-
-	"go.dalton.dog/spruce/internal/core"
+	colorful "github.com/lucasb-eyer/go-colorful"
 )
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// gradPalette is the cyclic colour loop the loading border sweeps through —
+// spruce's blue/purple/pink accents. mustHex panics only on a bad literal.
+var gradPalette = []colorful.Color{
+	mustHex("#5fd7ff"), // cyan-blue
+	mustHex("#af87ff"), // purple
+	mustHex("#ff5fd7"), // pink
+}
+
+func mustHex(s string) colorful.Color {
+	c, err := colorful.Hex(s)
+	if err != nil {
+		panic(err)
+	}
+	return c
+}
 
 var (
 	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
@@ -54,33 +70,13 @@ func (m Model) viewSelecting() string {
 	}
 
 	ps := m.panels()
-	availH := m.selectAvailHeight()
-	totalW := m.width
-	if totalW <= 0 {
-		totalW = 80
+	focusedSrc := ""
+	if m.focus >= 0 && m.focus < len(ps) {
+		focusedSrc = ps[m.focus]
 	}
-
-	var grid string
-	if len(ps) == 1 {
-		grid = m.renderPanel(ps[0], totalW, availH, m.focus == 0)
-	} else {
-		leftW := totalW / 2
-		rightW := totalW - leftW - 1 // 1-col gap
-		left := m.renderPanel(ps[0], leftW, availH, m.focus == 0)
-
-		rights := ps[1:]
-		boxes := make([]string, len(rights))
-		base, rem := availH/len(rights), availH%len(rights)
-		for i, s := range rights {
-			h := base
-			if i < rem {
-				h++
-			}
-			boxes[i] = m.renderPanel(s, rightW, h, m.focus == i+1)
-		}
-		right := lipgloss.JoinVertical(lipgloss.Left, boxes...)
-		grid = lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right)
-	}
+	grid := renderColumns(ps, m.width, m.selectAvailHeight(), func(src string, w, h int) string {
+		return m.renderPanel(src, w, h, src == focusedSrc)
+	})
 
 	var b strings.Builder
 	b.WriteString(grid + "\n")
@@ -264,13 +260,111 @@ func (m Model) renderPanel(src string, totalW, totalH int, focused bool) string 
 		}
 	}
 
+	// While checking, draw a gradient border whose phase rotates each tick;
+	// otherwise a solid border (pink when focused, dim otherwise).
+	if checking {
+		return gradientBox(lines, innerW, innerH, float64(m.spinner)*0.03)
+	}
+	return solidBox(lines, focused)
+}
+
+// solidBox wraps content lines in a rounded border: pink when focused, dim
+// otherwise.
+func solidBox(content []string, focused bool) string {
 	border := lipgloss.NewStyle().Border(lipgloss.RoundedBorder())
 	if focused {
 		border = border.BorderForeground(lipgloss.Color("212"))
 	} else {
 		border = border.BorderForeground(lipgloss.Color("240"))
 	}
-	return border.Render(strings.Join(lines, "\n"))
+	return border.Render(strings.Join(content, "\n"))
+}
+
+// renderColumns lays panels out as a grid: the first source fills the tall left
+// column, the rest stack on the right. render draws one panel at a given size.
+func renderColumns(sources []string, totalW, availH int, render func(src string, w, h int) string) string {
+	if totalW <= 0 {
+		totalW = 80
+	}
+	if len(sources) == 1 {
+		return render(sources[0], totalW, availH)
+	}
+	leftW := totalW / 2
+	rightW := totalW - leftW - 1 // 1-col gap
+	left := render(sources[0], leftW, availH)
+
+	rights := sources[1:]
+	boxes := make([]string, len(rights))
+	base, rem := availH/len(rights), availH%len(rights)
+	for i, s := range rights {
+		h := base
+		if i < rem {
+			h++
+		}
+		boxes[i] = render(s, rightW, h)
+	}
+	right := lipgloss.JoinVertical(lipgloss.Left, boxes...)
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right)
+}
+
+// gradientBox wraps content (exactly innerH lines, each innerW wide) in a
+// rounded border whose colour sweeps the palette around the perimeter. phase
+// (in palette-loops) rotates the gradient; advance it over time to animate.
+func gradientBox(content []string, innerW, innerH int, phase float64) string {
+	w, h := innerW+2, innerH+2
+	perim := 2*w + 2*(h-2)
+
+	cell := func(rowt, col int, r rune) string {
+		t := float64(perimIndex(rowt, col, w, h))/float64(perim) + phase
+		c := loopColor(t)
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hex())).Render(string(r))
+	}
+
+	var b strings.Builder
+	b.WriteString(cell(0, 0, '╭'))
+	for col := 1; col < w-1; col++ {
+		b.WriteString(cell(0, col, '─'))
+	}
+	b.WriteString(cell(0, w-1, '╮') + "\n")
+
+	for r := range innerH {
+		b.WriteString(cell(r+1, 0, '│'))
+		b.WriteString(content[r])
+		b.WriteString(cell(r+1, w-1, '│') + "\n")
+	}
+
+	b.WriteString(cell(h-1, 0, '╰'))
+	for col := 1; col < w-1; col++ {
+		b.WriteString(cell(h-1, col, '─'))
+	}
+	b.WriteString(cell(h-1, w-1, '╯'))
+	return b.String()
+}
+
+// perimIndex maps a border cell to its clockwise position around the perimeter,
+// starting at the top-left corner, so adjacent cells get adjacent gradient stops.
+func perimIndex(row, col, w, h int) int {
+	switch {
+	case row == 0: // top edge, left → right
+		return col
+	case col == w-1: // right edge, top → bottom (corners counted in top/bottom)
+		return w + (row - 1)
+	case row == h-1: // bottom edge, right → left
+		return w + (h - 2) + (w - 1 - col)
+	default: // left edge, bottom → top
+		return 2*w + (h - 2) + ((h - 2) - row)
+	}
+}
+
+// loopColor samples the palette as a closed loop at fractional position t,
+// blending in HCL space for an even sweep.
+func loopColor(t float64) colorful.Color {
+	n := len(gradPalette)
+	t -= math.Floor(t) // wrap to [0,1)
+	x := t * float64(n)
+	i := int(x) % n
+	j := (i + 1) % n
+	return gradPalette[i].BlendHcl(gradPalette[j], x-math.Floor(x)).Clamped()
 }
 
 func (m Model) renderPanelRow(r row, isCursor bool, nameW, curW, newW int) string {
@@ -334,42 +428,63 @@ func panelColumns(rs []row, innerW int) (nameW, curW, newW int) {
 	return nameW, curW, newW
 }
 
+// viewReviewing keeps the Selecting grid as a backdrop and floats a small
+// confirmation modal over it, summarizing how much will change per backend.
 func (m Model) viewReviewing() string {
+	backdrop := m.viewSelecting()
+	modal := m.reviewModal()
+
+	x := max((m.width-lipgloss.Width(modal))/2, 0)
+	y := max((lipgloss.Height(backdrop)-lipgloss.Height(modal))/2, 0)
+
+	bg := lipgloss.NewLayer(backdrop)
+	fg := lipgloss.NewLayer(modal).X(x).Y(y).Z(1)
+	return lipgloss.NewCompositor(bg, fg).Render()
+}
+
+// reviewModal is the floating confirmation box: one line per backend with its
+// count, a total, and the confirm/cancel hint.
+func (m Model) reviewModal() string {
 	sel := m.selectionByBackend()
-	var b strings.Builder
-	b.WriteString(titleStyle.Render("Review") + "\n\n")
 
+	var rows []string
 	total := 0
-	for _, ups := range sel {
-		total += len(ups)
-	}
-
-	// Bound the detail so a large selection can't scroll off; we already showed
-	// the full list on the previous screen, so a capped summary is enough here.
-	budget := max(m.height-9, 3)
-	shown := 0
-
-	for _, name := range m.orderedSources() {
-		ups := sel[name]
-		if len(ups) == 0 {
+	for _, s := range m.panelSources() {
+		n := len(sel[s])
+		if n == 0 {
 			continue
 		}
-		b.WriteString(groupStyle.Render(strings.ToUpper(name)) +
-			dimStyle.Render(fmt.Sprintf("  %d package(s)", len(ups))) + "\n")
-		for _, u := range ups {
-			if shown >= budget {
-				b.WriteString(dimStyle.Render(fmt.Sprintf("  … and %d more", total-shown)) + "\n")
-				goto footer
-			}
-			b.WriteString("  • " + u.Name + " " + versionDiff(u) + "\n")
-			shown++
-		}
+		total += n
+		rows = append(rows, fmt.Sprintf("%s  %s",
+			padRight(groupStyle.Render(strings.ToUpper(s)), 10),
+			fmt.Sprintf("%d package%s", n, plural(n))))
 	}
 
-footer:
-	b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%d package(s) total. Nothing has changed yet.", total)) + "\n")
-	b.WriteString(helpStyle.Render("y/enter apply · esc back · q quit"))
-	return b.String()
+	body := []string{titleStyle.Render("Apply updates?"), ""}
+	if total == 0 {
+		body = append(body, dimStyle.Render("Nothing selected."))
+	} else {
+		body = append(body, rows...)
+		body = append(body, "",
+			fmt.Sprintf("%s across %d package manager%s",
+				okStyle.Render(fmt.Sprintf("%d package%s", total, plural(total))),
+				len(rows), plural(len(rows))))
+	}
+	body = append(body, "", helpStyle.Render("enter/y apply   ·   esc cancel"))
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("212")).
+		Background(lipgloss.Color("236")).
+		Padding(1, 3).
+		Render(lipgloss.JoinVertical(lipgloss.Left, body...))
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // orderedSources returns the backend names in first-appearance order, so views
@@ -442,22 +557,6 @@ func (m Model) sourceStatusLine(name string, st *srcState) string {
 		return fmt.Sprintf("%s  %s %s%s %s", label, m.spin(), phase, item,
 			dimStyle.Render(fmt.Sprintf("(%d done)", st.done)))
 	}
-}
-
-// versionDiff renders "1.0 → 1.1", dimming the current version and arrow.
-func versionDiff(u core.Update) string {
-	return versionDiffAligned(u, 0)
-}
-
-// versionDiffAligned is versionDiff with the current-version column right-padded
-// to curW so the arrows line up across rows. curW of 0 disables padding.
-func versionDiffAligned(u core.Update, curW int) string {
-	cur := displayVersion(u.CurrentVersion)
-	nv := displayVersion(u.NewVersion)
-	if curW > 0 {
-		cur = padRight(truncate(cur, curW), curW)
-	}
-	return dimStyle.Render(cur) + dimStyle.Render(" → ") + nv
 }
 
 func displayVersion(v string) string {

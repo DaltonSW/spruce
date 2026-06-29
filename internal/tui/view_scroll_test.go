@@ -98,8 +98,8 @@ func TestEmptyBackendShowsPanel(t *testing.T) {
 // fakeBackend is a minimal core.Backend; only Name() matters for the view.
 type fakeBackend struct{ name string }
 
-func (f fakeBackend) Name() string      { return f.name }
-func (f fakeBackend) Available() bool   { return true }
+func (f fakeBackend) Name() string    { return f.name }
+func (f fakeBackend) Available() bool { return true }
 func (fakeBackend) Check(context.Context) ([]core.Update, error) {
 	return nil, nil
 }
@@ -151,6 +151,42 @@ func TestStreamingDiscovery(t *testing.T) {
 	body = m.viewSelecting()
 	if !strings.Contains(body, "ripgrep") {
 		t.Errorf("brew's updates should have popped in:\n%s", body)
+	}
+}
+
+// Review is a floating modal summarizing counts per backend; backends with
+// nothing selected are omitted, and the composited view still fits the terminal.
+func TestReviewModal(t *testing.T) {
+	m := gridModel(map[string]int{"system": 50, "brew": 4, "snap": 0})
+	m.state = stateReviewing
+	// Deselect everything in brew so it shouldn't appear in the modal.
+	for _, r := range m.sourceRows("brew") {
+		m.selected[r.update.ID()] = false
+	}
+
+	modal := m.reviewModal()
+	if !strings.Contains(modal, "Apply updates?") {
+		t.Errorf("modal missing title:\n%s", modal)
+	}
+	if !strings.Contains(modal, "SYSTEM") {
+		t.Errorf("modal missing system count:\n%s", modal)
+	}
+	if strings.Contains(modal, "BREW") {
+		t.Errorf("brew has no selections and should be absent from the modal:\n%s", modal)
+	}
+	if !strings.Contains(modal, "across") {
+		t.Errorf("modal should summarize the total across managers:\n%s", modal)
+	}
+
+	full := "spruce\n\n" + m.viewReviewing()
+	lines := strings.Split(full, "\n")
+	if len(lines) > m.height {
+		t.Errorf("composited review is %d lines, exceeds height %d", len(lines), m.height)
+	}
+	for i, ln := range lines {
+		if w := lipgloss.Width(ln); w > m.width {
+			t.Errorf("review line %d width %d exceeds %d", i, w, m.width)
+		}
 	}
 }
 
