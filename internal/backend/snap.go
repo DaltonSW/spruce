@@ -74,17 +74,44 @@ func (Snap) Check(ctx context.Context) ([]core.Update, error) {
 	if err := json.Unmarshal(r.Result, &list); err != nil {
 		return nil, err
 	}
+	// find?select=refresh only reports the candidate (new) version. Pull the
+	// installed versions from /v2/snaps and join them on. Best-effort: a failure
+	// just leaves CurrentVersion empty rather than failing the whole check.
+	installed := snapInstalledVersions(ctx)
+
 	var ups []core.Update
 	for _, s := range list {
 		ups = append(ups, core.Update{
-			Name:       s.Name,
-			NewVersion: s.Version,
-			Source:     "snap",
-			Repo:       s.Channel,
-			Kind:       "snap",
+			Name:           s.Name,
+			CurrentVersion: installed[s.Name],
+			NewVersion:     s.Version,
+			Source:         "snap",
+			Repo:           s.Channel,
+			Kind:           "snap",
 		})
 	}
 	return ups, nil
+}
+
+// snapInstalledVersions returns installed snap versions keyed by name. Returns
+// nil on error; lookups against a nil map yield "" so callers need no guard.
+func snapInstalledVersions(ctx context.Context) map[string]string {
+	var r snapResp
+	if err := snapGet(ctx, "/v2/snaps", &r); err != nil {
+		return nil
+	}
+	var list []struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(r.Result, &list); err != nil {
+		return nil
+	}
+	versions := make(map[string]string, len(list))
+	for _, s := range list {
+		versions[s.Name] = s.Version
+	}
+	return versions
 }
 
 func (s Snap) Plan(ctx context.Context, selected []core.Update) (core.Plan, error) {

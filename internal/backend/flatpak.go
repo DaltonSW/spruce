@@ -29,6 +29,11 @@ func (Flatpak) Check(ctx context.Context) ([]core.Update, error) {
 		return nil, err
 	}
 
+	// remote-ls --updates only reports the candidate (new) version. Pull the
+	// installed versions from `flatpak list` and join them on by app id.
+	// Best-effort: a failure just leaves CurrentVersion empty.
+	installed := flatpakInstalledVersions(ctx)
+
 	seen := map[string]bool{}
 	var ups []core.Update
 	for _, remote := range remotes {
@@ -41,7 +46,8 @@ func (Flatpak) Check(ctx context.Context) ([]core.Update, error) {
 				continue
 			}
 			f := strings.Split(line, "\t")
-			u := core.Update{Source: "flatpak", Kind: "app", Name: f[0]}
+			u := core.Update{Source: "flatpak", Kind: "app", Name: f[0],
+				CurrentVersion: installed[f[0]]}
 			if len(f) > 1 {
 				u.NewVersion = f[1]
 			}
@@ -74,6 +80,31 @@ func flatpakRemotes(ctx context.Context) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// flatpakInstalledVersions returns installed app versions keyed by application
+// id. Returns nil on error; lookups against a nil map yield "".
+func flatpakInstalledVersions(ctx context.Context) map[string]string {
+	// No --app filter: the updates list includes runtimes, so we need their
+	// installed versions too.
+	cmd := exec.CommandContext(ctx, "flatpak", "list",
+		"--columns=application,version")
+	cmd.Env = envBase()
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	versions := map[string]string{}
+	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		f := strings.Split(line, "\t")
+		if len(f) > 1 {
+			versions[f[0]] = f[1]
+		}
+	}
+	return versions
 }
 
 func (f Flatpak) Plan(ctx context.Context, selected []core.Update) (core.Plan, error) {

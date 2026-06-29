@@ -11,9 +11,11 @@ import (
 	"go.dalton.dog/spruce/internal/core"
 )
 
-// tickCmd drives the spinner animation while discovering/applying.
+// tickCmd drives the spinner animation while discovering/applying. It runs at
+// 30fps so the gradient border sweeps smoothly; the braille spinner is slowed
+// back down in spin() so its frame rate stays comfortable.
 func tickCmd() tea.Cmd {
-	return tea.Tick(time.Second/10, func(time.Time) tea.Msg { return tickMsg{} })
+	return tea.Tick(time.Second/30, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
 // --- message types ---------------------------------------------------------

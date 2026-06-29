@@ -31,9 +31,20 @@ type srcState struct {
 	phase    string
 	item     string
 	done     int
+	fraction float64 // 0–1 progress for the current item, if reported
 	failed   bool
 	finished bool
 	errText  string
+	logs     []string // tail of this backend's raw output, shown in its panel
+}
+
+// appendLog keeps a bounded tail of the backend's output for its panel.
+func (st *srcState) appendLog(line string) {
+	const max = 200
+	st.logs = append(st.logs, line)
+	if len(st.logs) > max {
+		st.logs = st.logs[len(st.logs)-max:]
+	}
 }
 
 // Model is the whole application state.
@@ -63,7 +74,6 @@ type Model struct {
 	// Applying
 	applyCh  <-chan core.ProgressEvent
 	progress map[string]*srcState
-	logs     []string // tail of raw log lines
 
 	// Flags from the CLI.
 	autoYes bool // -y: skip the gates and apply the default selection at once
@@ -397,29 +407,25 @@ func (m *Model) applyEvent(ev core.ProgressEvent) {
 	switch ev.Kind {
 	case core.EventPhase:
 		st.phase = ev.Phase
+		st.fraction = 0
 		if ev.Item != "" {
 			st.item = ev.Item
 		}
+	case core.EventProgress:
+		st.fraction = ev.Fraction
 	case core.EventItemDone:
 		st.done++
+		st.fraction = 0
 	case core.EventError:
 		st.failed = true
 		st.errText = ev.Text
-		m.appendLog(ev.Source + ": " + ev.Text)
+		st.appendLog("✗ " + ev.Text)
 	case core.EventPrompt:
-		m.appendLog(ev.Source + " ⏸ " + ev.Text)
+		st.appendLog("⏸ " + ev.Text)
 	case core.EventDone:
 		st.finished = true
 		st.phase = "Done"
 	case core.EventLog:
-		m.appendLog(ev.Text)
-	}
-}
-
-func (m *Model) appendLog(line string) {
-	const max = 200
-	m.logs = append(m.logs, line)
-	if len(m.logs) > max {
-		m.logs = m.logs[len(m.logs)-max:]
+		st.appendLog(ev.Text)
 	}
 }

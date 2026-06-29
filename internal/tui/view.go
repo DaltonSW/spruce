@@ -12,12 +12,28 @@ import (
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// gradPalette is the cyclic colour loop the loading border sweeps through —
-// spruce's blue/purple/pink accents. mustHex panics only on a bad literal.
+// dimBorder is the resting border colour for an unfocused panel (xterm 240).
+// It anchors the loading gradient so the bright accents sweep over a dim base.
+const dimBorder = "#585858"
+
+// gradPalette is the cyclic colour loop the loading border sweeps through. The
+// dim unselected-border colour dominates so the bright blue/purple/pink accents
+// form a small, compact highlight — a "comet" — that sweeps over a dim base,
+// making the motion read clearly instead of blending into a uniform glow. The
+// run of dim stops keeps the bright arc to a small fraction of the perimeter.
+// mustHex panics only on a bad literal.
 var gradPalette = []colorful.Color{
+	mustHex(dimBorder),
+	mustHex(dimBorder),
+	mustHex(dimBorder),
+	mustHex(dimBorder),
+	mustHex(dimBorder),
+	mustHex(dimBorder),
+	mustHex(dimBorder),
 	mustHex("#5fd7ff"), // cyan-blue
 	mustHex("#af87ff"), // purple
 	mustHex("#ff5fd7"), // pink
+	mustHex(dimBorder),
 }
 
 func mustHex(s string) colorful.Color {
@@ -57,7 +73,9 @@ func (m Model) View() tea.View {
 	return v
 }
 
-func (m Model) spin() string { return spinnerFrames[m.spinner%len(spinnerFrames)] }
+// spin advances every 3rd tick so the braille spinner stays at ~10fps even
+// though the tick loop runs at 30fps for a smooth gradient border.
+func (m Model) spin() string { return spinnerFrames[(m.spinner/3)%len(spinnerFrames)] }
 
 func (m Model) viewDiscovering() string {
 	return fmt.Sprintf("%s Looking for available package managers…", m.spin())
@@ -276,7 +294,7 @@ func solidBox(content []string, focused bool) string {
 	if focused {
 		border = border.BorderForeground(lipgloss.Color("212"))
 	} else {
-		border = border.BorderForeground(lipgloss.Color("240"))
+		border = border.BorderForeground(lipgloss.Color(dimBorder))
 	}
 	return border.Render(strings.Join(content, "\n"))
 }
@@ -316,7 +334,7 @@ func gradientBox(content []string, innerW, innerH int, phase float64) string {
 	perim := 2*w + 2*(h-2)
 
 	cell := func(rowt, col int, r rune) string {
-		t := float64(perimIndex(rowt, col, w, h))/float64(perim) + phase
+		t := float64(perimIndex(rowt, col, w, h))/float64(perim) - phase
 		c := loopColor(t)
 		return lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hex())).Render(string(r))
 	}
@@ -510,32 +528,36 @@ func (m Model) orderedSources() []string {
 	return out
 }
 
+// viewApplying mirrors the Selecting layout: one panel per backend being
+// applied, each showing its live status, a progress bar, and its own scrolling
+// output — so nothing is collapsed into a single fast-scrolling black box.
 func (m Model) viewApplying() string {
+	srcs := m.appliedSources()
+	if len(srcs) == 0 {
+		return dimStyle.Render("Nothing to apply.") + "\n\n" + helpStyle.Render("q quit")
+	}
+
+	grid := renderColumns(srcs, m.width, m.selectAvailHeight(), func(src string, w, h int) string {
+		return m.renderApplyPanel(src, w, h)
+	})
+
 	var b strings.Builder
-	header := "Applying updates"
-	if m.state == stateDone {
-		header = "Done"
-	}
-	b.WriteString(titleStyle.Render(header) + m.dryRunBadge() + "\n\n")
+	b.WriteString(grid + "\n")
 
-	// Per-source status lines, in a stable order.
-	for _, name := range m.orderedSources() {
-		b.WriteString(m.sourceStatusLine(name, m.progress[name]) + "\n")
-	}
-
-	// Log tail.
-	if len(m.logs) > 0 {
-		b.WriteString("\n" + dimStyle.Render("— output —") + "\n")
-		tail := m.logs
-		if len(tail) > 12 {
-			tail = tail[len(tail)-12:]
-		}
-		for _, l := range tail {
-			b.WriteString(dimStyle.Render(truncate(l, max(10, m.width-2))) + "\n")
+	done, total := 0, len(srcs)
+	for _, s := range srcs {
+		if st := m.progress[s]; st != nil && (st.finished || st.failed) {
+			done++
 		}
 	}
+	status := dimStyle.Render(fmt.Sprintf("%d of %d package managers finished", done, total))
+	if m.state != stateDone {
+		status = dimStyle.Render(fmt.Sprintf("%s applying  ·  %s", m.spin(),
+			fmt.Sprintf("%d of %d package managers finished", done, total)))
+	}
+	status += m.dryRunBadge()
+	b.WriteString(status + "\n")
 
-	b.WriteString("\n")
 	if m.state == stateDone {
 		b.WriteString(helpStyle.Render("q/enter quit"))
 	} else {
@@ -544,28 +566,160 @@ func (m Model) viewApplying() string {
 	return b.String()
 }
 
-func (m Model) sourceStatusLine(name string, st *srcState) string {
-	label := groupStyle.Render(strings.ToUpper(name))
+// appliedSources is the set of backends in this apply run — those with a
+// selection — in stable display order.
+func (m Model) appliedSources() []string {
+	sel := m.selectionByBackend()
+	var out []string
+	for _, s := range m.panelSources() {
+		if len(sel[s]) > 0 {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// renderApplyPanel draws one backend's live apply box at the given total size:
+// header with a done/total count, a status/progress line, and the backend's own
+// output tail filling the rest. The border animates (gradient) while working,
+// turns green when finished and red when failed.
+func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
+	innerW := max(totalW-2, 8)
+	innerH := max(totalH-2, 1)
+	st := m.progress[src]
+	total := len(m.selectionByBackend()[src])
+
+	done := 0
+	if st != nil {
+		done = st.done
+	}
+	right := fmt.Sprintf(" %d/%d", done, total)
+	title := truncate(strings.ToUpper(src), max(innerW-lipgloss.Width(right), 1))
+	header := padRight(groupStyle.Render(title)+dimStyle.Render(right), innerW)
+
+	lines := make([]string, 0, innerH)
+	lines = append(lines, header)
+	contentH := max(innerH-1, 1)
+
+	// Status line + a progress bar across the panel width.
+	body := make([]string, 0, contentH)
+	body = append(body, padRight(m.applyStatusLine(st), innerW))
+	if contentH >= 2 {
+		frac := 0.0
+		if total > 0 {
+			frac = (float64(done) + clamp01(stFraction(st))) / float64(total)
+		}
+		if st != nil && st.finished && !st.failed {
+			frac = 1
+		}
+		body = append(body, padRight(progressBar(frac, innerW, st), innerW))
+	}
+
+	// The backend's own output tail fills whatever height remains.
+	logH := contentH - len(body)
+	if logH > 0 {
+		var logs []string
+		if st != nil {
+			logs = st.logs
+		}
+		if len(logs) > logH {
+			logs = logs[len(logs)-logH:]
+		}
+		for _, l := range logs {
+			body = append(body, padRight(dimStyle.Render(truncate(stripCR(l), innerW)), innerW))
+		}
+	}
+	for len(body) < contentH {
+		body = append(body, padRight("", innerW))
+	}
+	lines = append(lines, body[:contentH]...)
+
+	// Border colour reflects state; animate the gradient while still working.
+	switch {
+	case st != nil && st.failed:
+		return solidBoxColor(lines, "203")
+	case st != nil && st.finished:
+		return solidBoxColor(lines, "78")
+	case m.state == stateDone:
+		return solidBoxColor(lines, "240")
+	default:
+		return gradientBox(lines, innerW, innerH, float64(m.spinner)*0.03)
+	}
+}
+
+// applyStatusLine is the one-line status shown at the top of an apply panel.
+func (m Model) applyStatusLine(st *srcState) string {
 	if st == nil {
-		return fmt.Sprintf("%s  %s", label, dimStyle.Render("waiting…"))
+		return dimStyle.Render("waiting…")
 	}
 	switch {
 	case st.failed:
-		return fmt.Sprintf("%s  %s", label, errStyle.Render("failed: "+st.errText))
+		return errStyle.Render(truncate("✗ "+st.errText, max(m.width, 1)))
 	case st.finished:
-		return fmt.Sprintf("%s  %s", label, okStyle.Render(fmt.Sprintf("✓ done (%d upgraded)", st.done)))
+		return okStyle.Render(fmt.Sprintf("✓ done (%d upgraded)", st.done))
 	default:
 		phase := st.phase
 		if phase == "" {
 			phase = "working"
 		}
-		item := ""
+		line := m.spin() + " " + phase
 		if st.item != "" {
-			item = " " + st.item
+			line += " " + dimStyle.Render(st.item)
 		}
-		return fmt.Sprintf("%s  %s %s%s %s", label, m.spin(), phase, item,
-			dimStyle.Render(fmt.Sprintf("(%d done)", st.done)))
+		return line
 	}
+}
+
+// progressBar renders a [████░░░░] bar of the given width for fraction f.
+func progressBar(f float64, w int, st *srcState) string {
+	if w < 4 {
+		return strings.Repeat(" ", max(w, 0))
+	}
+	f = clamp01(f)
+	fill := int(f * float64(w))
+	color := lipgloss.Color("75")
+	switch {
+	case st != nil && st.failed:
+		color = lipgloss.Color("203")
+	case st != nil && st.finished:
+		color = lipgloss.Color("78")
+	}
+	bar := lipgloss.NewStyle().Foreground(color).Render(strings.Repeat("█", fill))
+	rest := dimStyle.Render(strings.Repeat("░", w-fill))
+	return bar + rest
+}
+
+func stFraction(st *srcState) float64 {
+	if st == nil {
+		return 0
+	}
+	return st.fraction
+}
+
+func clamp01(f float64) float64 {
+	if f < 0 {
+		return 0
+	}
+	if f > 1 {
+		return 1
+	}
+	return f
+}
+
+// stripCR drops carriage returns so PTY progress lines don't smear the panel.
+func stripCR(s string) string {
+	if i := strings.LastIndexByte(s, '\r'); i >= 0 {
+		s = s[i+1:]
+	}
+	return strings.TrimRight(s, "\r\n")
+}
+
+// solidBoxColor wraps content lines in a rounded border of the given colour.
+func solidBoxColor(content []string, color string) string {
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(color)).
+		Render(strings.Join(content, "\n"))
 }
 
 func displayVersion(v string) string {

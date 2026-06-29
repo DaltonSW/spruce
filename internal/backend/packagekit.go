@@ -20,10 +20,16 @@ const (
 	pkRootPath = "/org/freedesktop/PackageKit"
 	pkTxIface  = "org.freedesktop.PackageKit.Transaction"
 
-	// Pk transaction flags. SIMULATE resolves what would change and emits the
-	// Package signals without installing — a safe, repeatable dry run.
-	pkFlagNone     = uint64(0)
-	pkFlagSimulate = uint64(1 << 1)
+	// Pk transaction flag for a real upgrade. We deliberately do NOT use the
+	// SIMULATE flag for dry runs: the dnf5 PackageKit backend has been observed
+	// to ignore it and apply the transaction for real, so dry runs never call
+	// the mutating UpdatePackages method at all (see Apply).
+	pkFlagNone = uint64(0)
+
+	// Pk filter bitfield. Unlike the transaction flag above (whose enum values
+	// are already bit positions), the filter enum is sequential (UNKNOWN=0,
+	// NONE=1, INSTALLED=2, ...) and the wire value is 1<<enum.
+	pkFilterInstalled = uint64(1 << 2) // PK_FILTER_ENUM_INSTALLED
 )
 
 func (PackageKit) Name() string { return "system" }
@@ -151,7 +157,48 @@ func (PackageKit) Check(ctx context.Context) ([]core.Update, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// GetUpdates only reports the candidate (new) version. Resolve the installed
+	// versions in a second transaction on the same warm daemon and join them on.
+	// Best-effort: if it fails we simply leave CurrentVersion empty rather than
+	// failing the whole check.
+	if len(ups) > 0 {
+		names := make([]string, len(ups))
+		for i, u := range ups {
+			names[i] = u.Name
+		}
+		if installed := resolveInstalled(ctx, conn, names); installed != nil {
+			for i := range ups {
+				ups[i].CurrentVersion = installed[pkgKey(ups[i].Ref)]
+			}
+		}
+	}
 	return ups, nil
+}
+
+// resolveInstalled returns installed versions for the given package names,
+// keyed by name;arch so multilib packages (same name, different arch) don't
+// clobber each other. Returns nil on any error.
+func resolveInstalled(ctx context.Context, conn *dbus.Conn, names []string) map[string]string {
+	tpath, err := createTransaction(ctx, conn)
+	if err != nil {
+		return nil
+	}
+	versions := map[string]string{}
+	err = runTransaction(ctx, conn, tpath,
+		pkTxIface+".Resolve", []any{pkFilterInstalled, names},
+		func(name string, body []any) {
+			if name != "Package" || len(body) < 2 {
+				return
+			}
+			id, _ := body[1].(string)
+			_, v := parsePackageID(id)
+			versions[pkgKey(id)] = v
+		})
+	if err != nil {
+		return nil
+	}
+	return versions
 }
 
 func (p PackageKit) Plan(ctx context.Context, selected []core.Update) (core.Plan, error) {
@@ -171,6 +218,23 @@ func (PackageKit) Apply(ctx context.Context, plan core.Plan) (<-chan core.Progre
 	go func() {
 		defer close(events)
 
+		// Dry run: never enter PackageKit's update path. The SIMULATE flag is not
+		// reliably honoured by the dnf5 backend (it has applied transactions for
+		// real), so we refuse to call the mutating UpdatePackages at all and just
+		// report what would be updated from the already-resolved selection. This
+		// touches nothing on the system — no daemon call, no polkit prompt.
+		if plan.DryRun {
+			events <- core.ProgressEvent{Kind: core.EventLog, Source: "system",
+				Text: "(dry run — preview only, PackageKit is not invoked)"}
+			for _, u := range plan.Selected {
+				events <- core.ProgressEvent{Kind: core.EventPhase, Source: "system",
+					Item: u.Name, Phase: "Would update"}
+				events <- core.ProgressEvent{Kind: core.EventItemDone, Source: "system", OK: true}
+			}
+			events <- core.ProgressEvent{Kind: core.EventDone, Source: "system", OK: true}
+			return
+		}
+
 		conn, err := dbus.ConnectSystemBus()
 		if err != nil {
 			events <- core.ProgressEvent{Kind: core.EventError, Source: "system", Text: err.Error()}
@@ -186,16 +250,10 @@ func (PackageKit) Apply(ctx context.Context, plan core.Plan) (<-chan core.Progre
 			return
 		}
 
-		flags := pkFlagNone
-		if plan.DryRun {
-			flags = pkFlagSimulate // resolves only; no polkit prompt, no changes
-			events <- core.ProgressEvent{Kind: core.EventLog, Source: "system",
-				Text: "(dry run — simulating, nothing will change)"}
-		}
-
-		// the package_ids to update. polkit prompts here unless simulating.
+		// A real upgrade: polkit prompts here. (Dry runs returned above and never
+		// reach this mutating call.)
 		err = runTransaction(ctx, conn, tpath,
-			pkTxIface+".UpdatePackages", []any{flags, ids},
+			pkTxIface+".UpdatePackages", []any{pkFlagNone, ids},
 			func(name string, body []any) {
 				switch name {
 				case "Package":
@@ -233,6 +291,21 @@ func parsePackageID(id string) (name, version string) {
 		version = parts[1]
 	}
 	return
+}
+
+// pkgKey is the "name;arch" portion of a package_id. It is stable across a
+// package's installed and candidate versions, so it joins an update to its
+// installed counterpart even on multilib systems where one name spans arches.
+func pkgKey(id string) string {
+	parts := strings.Split(id, ";")
+	name, arch := "", ""
+	if len(parts) > 0 {
+		name = parts[0]
+	}
+	if len(parts) > 2 {
+		arch = parts[2]
+	}
+	return name + ";" + arch
 }
 
 // toUint coerces the various unsigned integer types D-Bus may hand back.
