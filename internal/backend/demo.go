@@ -45,6 +45,9 @@ func (d demoBackend) Check(ctx context.Context) ([]core.Update, error) {
 			Source:         d.name,
 			Kind:           "package",
 			Pinned:         pinned,
+			// Spread a believable range of sizes (tens of kB to ~200 MB) so the
+			// size column and totals have something to show.
+			SizeBytes: int64(40_000+i*97_000) * int64(1+i%7),
 		})
 	}
 	return ups, nil

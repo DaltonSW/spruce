@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/dustin/go-humanize"
+
 	"go.dalton.dog/spruce/internal/core"
 	"go.dalton.dog/spruce/internal/ptyrun"
 )
@@ -38,7 +40,7 @@ func (Flatpak) Check(ctx context.Context) ([]core.Update, error) {
 	var ups []core.Update
 	for _, remote := range remotes {
 		cmd := exec.CommandContext(ctx, "flatpak", "remote-ls", remote, "--updates",
-			"--columns=application,version,origin")
+			"--columns=application,version,origin,commit,download-size")
 		cmd.Env = envBase()
 		out, _ := cmd.Output() // tolerate a failing remote
 		for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
@@ -46,13 +48,36 @@ func (Flatpak) Check(ctx context.Context) ([]core.Update, error) {
 				continue
 			}
 			f := strings.Split(line, "\t")
+			cur := installed[f[0]]
 			u := core.Update{Source: "flatpak", Kind: "app", Name: f[0],
-				CurrentVersion: installed[f[0]]}
+				CurrentVersion: cur.version}
 			if len(f) > 1 {
 				u.NewVersion = f[1]
 			}
 			if len(f) > 2 {
 				u.Repo = f[2]
+			}
+			var newCommit string
+			if len(f) > 3 {
+				newCommit = f[3]
+			}
+			if len(f) > 4 {
+				// flatpak prints human sizes, e.g. "138.9 MB"; tolerate unparseable.
+				if n, err := humanize.ParseBytes(f[4]); err == nil {
+					u.SizeBytes = int64(n)
+				}
+			}
+			// Flatpak's version field often doesn't change between releases —
+			// the real difference is the commit. When the version strings would
+			// be identical (or are absent), fall back to the short commit so the
+			// two columns actually differ and convey something.
+			if u.NewVersion == u.CurrentVersion {
+				if c := shortCommit(cur.commit); c != "" {
+					u.CurrentVersion = joinVersionCommit(u.CurrentVersion, c)
+				}
+				if c := shortCommit(newCommit); c != "" {
+					u.NewVersion = joinVersionCommit(u.NewVersion, c)
+				}
 			}
 			key := u.Name + "@" + u.Repo
 			if seen[key] {
@@ -63,6 +88,23 @@ func (Flatpak) Check(ctx context.Context) ([]core.Update, error) {
 		}
 	}
 	return ups, nil
+}
+
+// shortCommit truncates a flatpak commit hash to a git-like short form.
+func shortCommit(c string) string {
+	if len(c) > 7 {
+		return c[:7]
+	}
+	return c
+}
+
+// joinVersionCommit renders a version with its disambiguating commit. With no
+// version (common for runtimes) it shows just the commit.
+func joinVersionCommit(version, commit string) string {
+	if version == "" {
+		return commit
+	}
+	return version + " (" + commit + ")"
 }
 
 // flatpakRemotes lists configured remote names.
@@ -82,27 +124,39 @@ func flatpakRemotes(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
+// flatpakInstall is the installed version plus its active commit, used to
+// disambiguate updates whose version string doesn't change.
+type flatpakInstall struct {
+	version string
+	commit  string
+}
+
 // flatpakInstalledVersions returns installed app versions keyed by application
-// id. Returns nil on error; lookups against a nil map yield "".
-func flatpakInstalledVersions(ctx context.Context) map[string]string {
+// id. Returns nil on error; lookups against a nil map yield the zero value.
+func flatpakInstalledVersions(ctx context.Context) map[string]flatpakInstall {
 	// No --app filter: the updates list includes runtimes, so we need their
 	// installed versions too.
 	cmd := exec.CommandContext(ctx, "flatpak", "list",
-		"--columns=application,version")
+		"--columns=application,version,active")
 	cmd.Env = envBase()
 	out, err := cmd.Output()
 	if err != nil {
 		return nil
 	}
-	versions := map[string]string{}
+	versions := map[string]flatpakInstall{}
 	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
 			continue
 		}
 		f := strings.Split(line, "\t")
-		if len(f) > 1 {
-			versions[f[0]] = f[1]
+		if len(f) < 2 {
+			continue
 		}
+		inst := flatpakInstall{version: f[1]}
+		if len(f) > 2 {
+			inst.commit = f[2]
+		}
+		versions[f[0]] = inst
 	}
 	return versions
 }

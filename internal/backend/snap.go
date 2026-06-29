@@ -67,9 +67,10 @@ func (Snap) Check(ctx context.Context) ([]core.Update, error) {
 		return nil, err
 	}
 	var list []struct {
-		Name    string `json:"name"`
-		Version string `json:"version"`
-		Channel string `json:"channel"`
+		Name         string `json:"name"`
+		Version      string `json:"version"`
+		Channel      string `json:"channel"`
+		DownloadSize int64  `json:"download-size"`
 	}
 	if err := json.Unmarshal(r.Result, &list); err != nil {
 		return nil, err
@@ -88,6 +89,7 @@ func (Snap) Check(ctx context.Context) ([]core.Update, error) {
 			Source:         "snap",
 			Repo:           s.Channel,
 			Kind:           "snap",
+			SizeBytes:      s.DownloadSize,
 		})
 	}
 	return ups, nil

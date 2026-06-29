@@ -172,8 +172,78 @@ func (PackageKit) Check(ctx context.Context) ([]core.Update, error) {
 				ups[i].CurrentVersion = installed[pkgKey(ups[i].Ref)]
 			}
 		}
+
+		// Join on each update's download size via GetDetails. Best-effort: on any
+		// error sizes simply stay unknown (0) and the UI omits them.
+		ids := make([]string, len(ups))
+		for i, u := range ups {
+			ids[i] = u.Ref
+		}
+		if sizes := resolveSizes(ctx, conn, ids); sizes != nil {
+			for i := range ups {
+				ups[i].SizeBytes = sizes[ups[i].Ref]
+			}
+		}
 	}
 	return ups, nil
+}
+
+// resolveSizes returns each package's download size (bytes) keyed by package_id,
+// fetched in one GetDetails transaction. Returns nil on any error.
+func resolveSizes(ctx context.Context, conn *dbus.Conn, ids []string) map[string]int64 {
+	if len(ids) == 0 {
+		return nil
+	}
+	tpath, err := createTransaction(ctx, conn)
+	if err != nil {
+		return nil
+	}
+	sizes := map[string]int64{}
+	err = runTransaction(ctx, conn, tpath,
+		pkTxIface+".GetDetails", []any{ids},
+		func(name string, body []any) {
+			if name != "Details" {
+				return
+			}
+			if id, sz, ok := parseDetails(body); ok {
+				sizes[id] = sz
+			}
+		})
+	if err != nil {
+		return nil
+	}
+	return sizes
+}
+
+// parseDetails pulls a package_id and its download size from a PackageKit
+// Details signal, handling both the modern a{sv} dict form (dnf5) and the older
+// positional form (id, license, group, detail, url, size). It prefers the
+// download size; for an already-cached update that is 0 and we leave it unknown
+// rather than substituting the (much larger) installed size.
+func parseDetails(body []any) (id string, size int64, ok bool) {
+	if len(body) == 1 {
+		m, isMap := body[0].(map[string]dbus.Variant)
+		if !isMap {
+			return "", 0, false
+		}
+		if v, has := m["package-id"]; has {
+			id, _ = v.Value().(string)
+		}
+		if v, has := m["download-size"]; has {
+			if n, good := toUint(v.Value()); good {
+				size = int64(n)
+			}
+		}
+		return id, size, id != ""
+	}
+	if len(body) >= 6 {
+		id, _ = body[0].(string)
+		if n, good := toUint(body[5]); good {
+			size = int64(n)
+		}
+		return id, size, id != ""
+	}
+	return "", 0, false
 }
 
 // resolveInstalled returns installed versions for the given package names,

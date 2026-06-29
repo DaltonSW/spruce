@@ -4,6 +4,7 @@ package tui
 
 import (
 	"context"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -35,7 +36,36 @@ type srcState struct {
 	failed   bool
 	finished bool
 	errText  string
-	logs     []string // tail of this backend's raw output, shown in its panel
+	seen     map[string]bool // package names that have been the active item at least once
+	logs     []string        // tail of this backend's raw output, shown in its panel
+
+	started    time.Time // first event seen for this backend (apply start)
+	finishedAt time.Time // when EventDone arrived, to freeze the elapsed timer
+}
+
+// elapsed is how long this backend has been (or was) applying. Zero before the
+// first event; frozen once finished.
+func (st *srcState) elapsed() time.Duration {
+	if st.started.IsZero() {
+		return 0
+	}
+	if !st.finishedAt.IsZero() {
+		return st.finishedAt.Sub(st.started)
+	}
+	return time.Since(st.started)
+}
+
+// markSeen records that a package name has been (or is) the active item, so the
+// apply view can mark it done once a later package takes over — important for
+// backends (PackageKit) that run one transaction and never emit EventItemDone.
+func (st *srcState) markSeen(name string) {
+	if name == "" {
+		return
+	}
+	if st.seen == nil {
+		st.seen = map[string]bool{}
+	}
+	st.seen[name] = true
 }
 
 // appendLog keeps a bounded tail of the backend's output for its panel.
@@ -404,15 +434,23 @@ func (m *Model) applyEvent(ev core.ProgressEvent) {
 		st = &srcState{}
 		m.progress[ev.Source] = st
 	}
+	if st.started.IsZero() {
+		st.started = time.Now()
+	}
 	switch ev.Kind {
 	case core.EventPhase:
 		st.phase = ev.Phase
 		st.fraction = 0
 		if ev.Item != "" {
 			st.item = ev.Item
+			st.markSeen(ev.Item)
 		}
 	case core.EventProgress:
 		st.fraction = ev.Fraction
+		if ev.Item != "" {
+			st.item = ev.Item
+			st.markSeen(ev.Item)
+		}
 	case core.EventItemDone:
 		st.done++
 		st.fraction = 0
@@ -425,6 +463,9 @@ func (m *Model) applyEvent(ev core.ProgressEvent) {
 	case core.EventDone:
 		st.finished = true
 		st.phase = "Done"
+		if st.finishedAt.IsZero() {
+			st.finishedAt = time.Now()
+		}
 	case core.EventLog:
 		st.appendLog(ev.Text)
 	}

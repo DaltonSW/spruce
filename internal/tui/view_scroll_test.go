@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -212,6 +213,163 @@ func TestDryRunToggle(t *testing.T) {
 	m = tm.(Model)
 	if m.dryRun {
 		t.Fatal("d should toggle dry run back off")
+	}
+}
+
+// The Applying view lists each selected package with a live status icon, scrolls
+// to keep the active item in view, and still fits the terminal.
+func TestApplyPanelListsPackages(t *testing.T) {
+	m := gridModel(map[string]int{"system": 40, "brew": 3})
+	m.state = stateApplying
+
+	// System is mid-apply: 5 done, currently working on #7; brew not started.
+	sysPkgs := m.selectionByBackend()["system"]
+	m.progress["system"] = &srcState{
+		done:     5,
+		item:     sysPkgs[7].Name,
+		phase:    "Updating",
+		fraction: 0.5,
+		seen:     map[string]bool{sysPkgs[7].Name: true},
+	}
+
+	body := m.viewApplying()
+
+	// The active package's name is visible (the list scrolled to it).
+	if !strings.Contains(body, sysPkgs[7].Name) {
+		t.Errorf("active package %q not shown:\n%s", sysPkgs[7].Name, body)
+	}
+	// Status icons for done and pending packages are present.
+	if !strings.Contains(body, "✓") {
+		t.Errorf("expected a done check mark:\n%s", body)
+	}
+	if !strings.Contains(body, "○") {
+		t.Errorf("expected a pending marker:\n%s", body)
+	}
+
+	// Must still fit the terminal.
+	full := "spruce\n\n" + body
+	for i, ln := range strings.Split(full, "\n") {
+		if w := lipgloss.Width(ln); w > m.width {
+			t.Errorf("apply line %d width %d exceeds %d: %q", i, w, m.width, ln)
+		}
+	}
+}
+
+// pkgRowStatus classifies packages from whatever a backend reported, including
+// the PackageKit case (no per-item Done, only named active item + seen-set).
+func TestPkgRowStatus(t *testing.T) {
+	// Sequential backend: 2 finished via done count, #2 active by name.
+	st := &srcState{done: 2, item: "c", seen: map[string]bool{"a": true, "b": true, "c": true}}
+	cases := []struct {
+		i    int
+		name string
+		want pkgStat
+	}{
+		{0, "a", statDone},
+		{1, "b", statDone},
+		{2, "c", statActive},
+		{3, "d", statPending},
+	}
+	for _, c := range cases {
+		if got := pkgRowStatus(c.i, c.name, st); got != c.want {
+			t.Errorf("pkgRowStatus(%d,%q)=%v, want %v", c.i, c.name, got, c.want)
+		}
+	}
+
+	// PackageKit-style: no done count, but seen-set marks finished ones.
+	pk := &srcState{done: 0, item: "c", seen: map[string]bool{"a": true, "b": true, "c": true}}
+	if got := pkgRowStatus(0, "a", pk); got != statDone {
+		t.Errorf("seen package should be done, got %v", got)
+	}
+	if got := pkgRowStatus(2, "c", pk); got != statActive {
+		t.Errorf("active package should be active, got %v", got)
+	}
+	if got := pkgRowStatus(3, "d", pk); got != statPending {
+		t.Errorf("unseen package should be pending, got %v", got)
+	}
+
+	// Failure marks the active item failed but keeps finished ones done.
+	f := &srcState{done: 1, item: "b", failed: true, finished: true, seen: map[string]bool{"a": true, "b": true}}
+	if got := pkgRowStatus(0, "a", f); got != statDone {
+		t.Errorf("pre-failure package should stay done, got %v", got)
+	}
+	if got := pkgRowStatus(1, "b", f); got != statFailed {
+		t.Errorf("active-at-failure package should be failed, got %v", got)
+	}
+}
+
+// Download sizes flow through to the selecting status line, the review modal
+// (per backend + grand total), and the live apply footer (downloaded/total +
+// rate + ETA), and the apply header carries an elapsed timer.
+func TestSizeAndTimingDisplay(t *testing.T) {
+	m := gridModel(map[string]int{"system": 6, "brew": 2})
+	for i := range m.rows {
+		m.rows[i].update.SizeBytes = 10_000_000 // 10 MB each → 80 MB total
+	}
+	m.width, m.height = 100, 30
+
+	// Selecting: per-row size and the selection total.
+	sel := m.viewSelecting()
+	if !strings.Contains(sel, "10 MB") {
+		t.Errorf("selecting rows should show per-package size:\n%s", sel)
+	}
+	if !strings.Contains(sel, "80 MB to download") {
+		t.Errorf("selecting status should show the selection total:\n%s", sel)
+	}
+
+	// Review modal: total download size.
+	m.state = stateReviewing
+	if mod := m.reviewModal(); !strings.Contains(mod, "80 MB to download") {
+		t.Errorf("review modal should summarize total download size:\n%s", mod)
+	}
+
+	// Apply: elapsed timer in the header, rate/ETA in the footer.
+	m.state = stateApplying
+	st := &srcState{done: 3, fraction: 0.5}
+	st.started = time.Now().Add(-10 * time.Second)
+	m.progress["system"] = st
+	app := m.viewApplying()
+	if !strings.Contains(app, "ETA") {
+		t.Errorf("apply footer should show an ETA when sizes are known:\n%s", app)
+	}
+	if !strings.Contains(app, "/s") {
+		t.Errorf("apply footer should show a download rate:\n%s", app)
+	}
+}
+
+func TestFormatBytes(t *testing.T) {
+	cases := []struct {
+		n    int64
+		want string
+	}{
+		{0, ""},
+		{-5, ""},
+		{512, "512 B"},
+		{50_300, "50 kB"},       // humanize.Bytes drops the decimal at values ≥10
+		{138_900_000, "139 MB"}, // and rounds
+		{1_500_000_000, "1.5 GB"},
+	}
+	for _, c := range cases {
+		if got := formatBytes(c.n); got != c.want {
+			t.Errorf("formatBytes(%d)=%q, want %q", c.n, got, c.want)
+		}
+	}
+}
+
+func TestFormatDuration(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "0:00"},
+		{42 * time.Second, "0:42"},
+		{83 * time.Second, "1:23"},
+		{3661 * time.Second, "1:01:01"},
+	}
+	for _, c := range cases {
+		if got := formatDuration(c.d); got != c.want {
+			t.Errorf("formatDuration(%v)=%q, want %q", c.d, got, c.want)
+		}
 	}
 }
 

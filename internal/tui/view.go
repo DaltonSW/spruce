@@ -4,10 +4,14 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/dustin/go-humanize"
 	colorful "github.com/lucasb-eyer/go-colorful"
+
+	"go.dalton.dog/spruce/internal/core"
 )
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -99,6 +103,9 @@ func (m Model) viewSelecting() string {
 	var b strings.Builder
 	b.WriteString(grid + "\n")
 	status := dimStyle.Render(fmt.Sprintf("%d of %d selected", m.countSelected(), len(m.rows)))
+	if b := m.selectedBytes(); b > 0 {
+		status += dimStyle.Render("  ·  " + formatBytes(b) + " to download")
+	}
 	if n := len(m.checking); n > 0 {
 		status += dimStyle.Render(fmt.Sprintf("  ·  %s checking %d…", m.spin(), n))
 	}
@@ -135,6 +142,18 @@ func (m Model) countSelected() int {
 		}
 	}
 	return n
+}
+
+// selectedBytes is the total download size of the current selection, across all
+// backends; 0 when no sizes are known.
+func (m Model) selectedBytes() int64 {
+	var b int64
+	for _, r := range m.rows {
+		if m.selected[r.update.ID()] {
+			b += r.update.SizeBytes
+		}
+	}
+	return b
 }
 
 // sourceRows returns the rows belonging to one backend, in list order.
@@ -264,11 +283,11 @@ func (m Model) renderPanel(src string, totalW, totalH int, focused bool) string 
 			offset = 0
 		}
 		end := min(offset+rowCap, len(rs))
-		nameW, curW, newW := panelColumns(rs, innerW)
+		nameW, curW, newW, sizeW := panelColumns(rs, innerW)
 
 		for i := offset; i < end; i++ {
 			isCur := focused && i == m.panelCursor[src]
-			lines = append(lines, padRight(m.renderPanelRow(rs[i], isCur, nameW, curW, newW), innerW))
+			lines = append(lines, padRight(m.renderPanelRow(rs[i], isCur, nameW, curW, newW, sizeW), innerW))
 		}
 		for k := end - offset; k < rowCap; k++ {
 			lines = append(lines, padRight("", innerW))
@@ -386,7 +405,7 @@ func loopColor(t float64) colorful.Color {
 	return gradPalette[i].BlendHcl(gradPalette[j], x-math.Floor(x)).Clamped()
 }
 
-func (m Model) renderPanelRow(r row, isCursor bool, nameW, curW, newW int) string {
+func (m Model) renderPanelRow(r row, isCursor bool, nameW, curW, newW, sizeW int) string {
 	cursor := "  "
 	if isCursor {
 		cursor = cursorStyle.Render("▶ ")
@@ -401,15 +420,19 @@ func (m Model) renderPanelRow(r row, isCursor bool, nameW, curW, newW int) strin
 
 	line := fmt.Sprintf("%s%s %s  %s%s%s",
 		cursor, check, name, dimStyle.Render(cur), dimStyle.Render(" → "), nv)
+	if sizeW > 0 {
+		line += "  " + dimStyle.Render(padLeft(truncate(formatBytes(r.update.SizeBytes), sizeW), sizeW))
+	}
 	if r.update.Pinned {
 		line += " " + pinStyle.Render("(pin)")
 	}
 	return line
 }
 
-// panelColumns sizes the name / current / new columns to fit innerW, sized from
-// the data but capped so the row never overflows the panel.
-func panelColumns(rs []row, innerW int) (nameW, curW, newW int) {
+// panelColumns sizes the name / current / new / size columns to fit innerW,
+// sized from the data but capped so the row never overflows the panel. The size
+// column is dropped when there isn't room for it alongside a readable name.
+func panelColumns(rs []row, innerW int) (nameW, curW, newW, sizeW int) {
 	const overhead = 2 + 3 + 1 + 2 + 3 // cursor, check, space, gap, " → "
 	pinSlack := 0
 	for _, r := range rs {
@@ -422,14 +445,33 @@ func panelColumns(rs []row, innerW int) (nameW, curW, newW int) {
 		if w := lipgloss.Width(displayVersion(r.update.NewVersion)); w > newW {
 			newW = w
 		}
+		if r.update.SizeBytes > 0 {
+			if w := lipgloss.Width(formatBytes(r.update.SizeBytes)); w > sizeW {
+				sizeW = w
+			}
+		}
 		if r.update.Pinned {
 			pinSlack = 6 // " (pin)"
 		}
 	}
-	curW = min(curW, 10)
-	newW = min(newW, 12)
+	// Cap generously: flatpak versions now carry a disambiguating " (commit)"
+	// suffix, and some refs (e.g. freedesktop-sdk-…) are long. The data-driven
+	// width means short versions still stay compact.
+	curW = min(curW, 24)
+	newW = min(newW, 24)
+	sizeW = min(sizeW, 9)
 
+	sizeCol := 0
+	if sizeW > 0 {
+		sizeCol = 2 + sizeW // "  142 MB"
+	}
 	avail := max(innerW-overhead-pinSlack, 6)
+	// Drop the size column rather than crush the name to fit it.
+	if sizeW > 0 && avail-curW-newW-sizeCol < 6 {
+		sizeW, sizeCol = 0, 0
+	}
+	avail -= sizeCol
+
 	nameW = min(nameW, avail-curW-newW)
 	if nameW < 4 {
 		nameW = 4
@@ -444,7 +486,7 @@ func panelColumns(rs []row, innerW int) (nameW, curW, newW int) {
 			}
 		}
 	}
-	return nameW, curW, newW
+	return nameW, curW, newW, sizeW
 }
 
 // viewReviewing keeps the Selecting grid as a backdrop and floats a small
@@ -468,15 +510,26 @@ func (m Model) reviewModal() string {
 
 	var rows []string
 	total := 0
+	var totalBytes int64
 	for _, s := range m.panelSources() {
-		n := len(sel[s])
+		ups := sel[s]
+		n := len(ups)
 		if n == 0 {
 			continue
 		}
 		total += n
-		rows = append(rows, fmt.Sprintf("%s  %s",
+		var bytes int64
+		for _, u := range ups {
+			bytes += u.SizeBytes
+		}
+		totalBytes += bytes
+		line := fmt.Sprintf("%s  %s",
 			padRight(groupStyle.Render(strings.ToUpper(s)), 10),
-			fmt.Sprintf("%d package%s", n, plural(n))))
+			padRight(fmt.Sprintf("%d package%s", n, plural(n)), 14))
+		if bytes > 0 {
+			line += dimStyle.Render(padLeft(formatBytes(bytes), 9))
+		}
+		rows = append(rows, line)
 	}
 
 	body := []string{titleStyle.Render("Apply updates?") + m.dryRunBadge(), ""}
@@ -484,10 +537,13 @@ func (m Model) reviewModal() string {
 		body = append(body, dimStyle.Render("Nothing selected."))
 	} else {
 		body = append(body, rows...)
-		body = append(body, "",
-			fmt.Sprintf("%s across %d package manager%s",
-				okStyle.Render(fmt.Sprintf("%d package%s", total, plural(total))),
-				len(rows), plural(len(rows))))
+		summary := fmt.Sprintf("%s across %d package manager%s",
+			okStyle.Render(fmt.Sprintf("%d package%s", total, plural(total))),
+			len(rows), plural(len(rows)))
+		if totalBytes > 0 {
+			summary += dimStyle.Render("  ·  " + formatBytes(totalBytes) + " to download")
+		}
+		body = append(body, "", summary)
 	}
 	body = append(body, "", helpStyle.Render("enter/y apply   ·   d dry run   ·   esc cancel"))
 
@@ -579,21 +635,87 @@ func (m Model) appliedSources() []string {
 	return out
 }
 
+// pkgStat is the lifecycle of one package during an apply.
+type pkgStat int
+
+const (
+	statPending pkgStat = iota
+	statActive
+	statDone
+	statFailed
+)
+
+// pkgRowStatus classifies the package at index i in the (ordered) selection,
+// from whatever the backend has reported. The order of checks matters: a
+// completed count (or whole-backend finish) wins over the live "active item" so
+// a just-finished package doesn't flicker back to active before the next
+// EventPhase arrives. The seen-set covers backends (PackageKit) that run one
+// transaction and report by package name without ever emitting EventItemDone.
+func pkgRowStatus(i int, name string, st *srcState) pkgStat {
+	if st == nil {
+		return statPending
+	}
+	switch {
+	case st.finished && !st.failed:
+		return statDone
+	case i < st.done:
+		return statDone
+	case st.failed && name == st.item:
+		return statFailed
+	case st.item != "" && name == st.item:
+		return statActive
+	case st.seen[name]:
+		return statDone
+	default:
+		return statPending
+	}
+}
+
+// activeRow is the index the panel scrolls to keep in view: the package being
+// worked on now, by name if known, else the next one by completed count.
+func activeRow(pkgs []core.Update, st *srcState) int {
+	if st == nil {
+		return 0
+	}
+	if st.item != "" {
+		for i, u := range pkgs {
+			if u.Name == st.item {
+				return i
+			}
+		}
+	}
+	if st.done < len(pkgs) {
+		return st.done
+	}
+	return max(len(pkgs)-1, 0)
+}
+
 // renderApplyPanel draws one backend's live apply box at the given total size:
-// header with a done/total count, a status/progress line, and the backend's own
-// output tail filling the rest. The border animates (gradient) while working,
-// turns green when finished and red when failed.
+// a header with a done/total count, then every selected package listed with a
+// live status icon (done/active/pending/failed), and an overall progress bar
+// pinned to the bottom. When the list is short, the backend's own output tail
+// fills the leftover room. The border animates (gradient) while working, turns
+// green when finished and red when failed.
 func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 	innerW := max(totalW-2, 8)
 	innerH := max(totalH-2, 1)
 	st := m.progress[src]
-	total := len(m.selectionByBackend()[src])
+	pkgs := m.selectionByBackend()[src]
+	total := len(pkgs)
 
 	done := 0
 	if st != nil {
 		done = st.done
+		if st.finished && !st.failed {
+			done = total // PackageKit never counts items; its final Done means all
+		}
 	}
 	right := fmt.Sprintf(" %d/%d", done, total)
+	if st != nil {
+		if d := st.elapsed(); d > 0 {
+			right += "  " + formatDuration(d)
+		}
+	}
 	title := truncate(strings.ToUpper(src), max(innerW-lipgloss.Width(right), 1))
 	header := padRight(groupStyle.Render(title)+dimStyle.Render(right), innerW)
 
@@ -601,33 +723,49 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 	lines = append(lines, header)
 	contentH := max(innerH-1, 1)
 
-	// Status line + a progress bar across the panel width.
 	body := make([]string, 0, contentH)
-	body = append(body, padRight(m.applyStatusLine(st), innerW))
+
+	// Reserve the last line for the overall progress bar (or an error message).
+	barH := 0
 	if contentH >= 2 {
-		frac := 0.0
-		if total > 0 {
-			frac = (float64(done) + clamp01(stFraction(st))) / float64(total)
-		}
-		if st != nil && st.finished && !st.failed {
-			frac = 1
-		}
-		body = append(body, padRight(progressBar(frac, innerW, st), innerW))
+		barH = 1
+	}
+	listH := contentH - barH
+
+	// The package list, scrolled so the active item stays in view.
+	nameW, curW, newW := applyColumns(pkgs, innerW)
+	offset := 0
+	if total > listH {
+		offset = clampInt(activeRow(pkgs, st)-listH/2, 0, total-listH)
+	}
+	end := min(offset+listH, total)
+	for i := offset; i < end; i++ {
+		body = append(body, padRight(m.renderApplyRow(i, pkgs[i], st, nameW, curW, newW), innerW))
 	}
 
-	// The backend's own output tail fills whatever height remains.
-	logH := contentH - len(body)
-	if logH > 0 {
+	// Short list: fill the gap above the bar with the backend's output tail.
+	if gap := listH - (end - offset); gap > 0 {
 		var logs []string
 		if st != nil {
 			logs = st.logs
 		}
-		if len(logs) > logH {
-			logs = logs[len(logs)-logH:]
+		if len(logs) > gap {
+			logs = logs[len(logs)-gap:]
 		}
 		for _, l := range logs {
 			body = append(body, padRight(dimStyle.Render(truncate(stripCR(l), innerW)), innerW))
 		}
+		for len(body) < listH {
+			body = append(body, padRight("", innerW))
+		}
+	}
+
+	if barH == 1 {
+		var totalBytes int64
+		for _, u := range pkgs {
+			totalBytes += u.SizeBytes
+		}
+		body = append(body, padRight(m.applyBottomLine(st, done, total, totalBytes, innerW), innerW))
 	}
 	for len(body) < contentH {
 		body = append(body, padRight("", innerW))
@@ -647,27 +785,152 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 	}
 }
 
-// applyStatusLine is the one-line status shown at the top of an apply panel.
-func (m Model) applyStatusLine(st *srcState) string {
-	if st == nil {
-		return dimStyle.Render("waiting…")
-	}
-	switch {
-	case st.failed:
-		return errStyle.Render(truncate("✗ "+st.errText, max(m.width, 1)))
-	case st.finished:
-		return okStyle.Render(fmt.Sprintf("✓ done (%d upgraded)", st.done))
+// renderApplyRow draws one package line in an apply panel: a status icon, the
+// name, and its version bump. The active row carries a spinner and its current
+// phase/percentage so you can watch the work move down the list.
+func (m Model) renderApplyRow(i int, u core.Update, st *srcState, nameW, curW, newW int) string {
+	status := pkgRowStatus(i, u.Name, st)
+	var icon string
+	switch status {
+	case statDone:
+		icon = okStyle.Render("✓")
+	case statActive:
+		icon = cursorStyle.Render(m.spin())
+	case statFailed:
+		icon = errStyle.Render("✗")
 	default:
-		phase := st.phase
-		if phase == "" {
-			phase = "working"
-		}
-		line := m.spin() + " " + phase
-		if st.item != "" {
-			line += " " + dimStyle.Render(st.item)
-		}
-		return line
+		icon = dimStyle.Render("○")
 	}
+
+	name := padRight(truncate(u.Name, nameW), nameW)
+	cur := padRight(truncate(displayVersion(u.CurrentVersion), curW), curW)
+	nv := truncate(displayVersion(u.NewVersion), newW)
+	line := fmt.Sprintf("%s %s  %s%s%s",
+		icon, name, dimStyle.Render(cur), dimStyle.Render(" → "), nv)
+
+	// Annotate the in-flight package with what it's doing right now.
+	if status == statActive && st != nil {
+		note := st.phase
+		if frac := stFraction(st); frac > 0 {
+			note = strings.TrimSpace(fmt.Sprintf("%s %d%%", note, int(clamp01(frac)*100)))
+		}
+		if note != "" {
+			line += "  " + dimStyle.Render("· "+note)
+		}
+	}
+	return line
+}
+
+// applyBottomLine is the panel's summary footer: an error when failed, a done
+// note (with elapsed time) when finished, otherwise an overall progress bar with
+// a downloaded/total · rate · ETA cluster on the right when sizes are known.
+func (m Model) applyBottomLine(st *srcState, done, total int, totalBytes int64, w int) string {
+	switch {
+	case st != nil && st.failed:
+		return errStyle.Render(truncate("✗ "+st.errText, max(w, 1)))
+	case st != nil && st.finished:
+		note := fmt.Sprintf("✓ done (%d upgraded)", done)
+		if d := st.elapsed(); d > 0 {
+			note += " · " + formatDuration(d)
+		}
+		return okStyle.Render(note)
+	default:
+		frac := 0.0
+		if total > 0 {
+			frac = (float64(done) + clamp01(stFraction(st))) / float64(total)
+		}
+		right := rateETA(st, frac, totalBytes)
+		barW := w
+		if right != "" {
+			barW = max(w-lipgloss.Width(right)-2, 4)
+		}
+		bar := progressBar(frac, barW, st)
+		if right == "" {
+			return bar
+		}
+		return bar + "  " + dimStyle.Render(right)
+	}
+}
+
+// rateETA renders a "64.0 MB/142 MB · 1.2 MB/s · ETA 0:15" cluster from the
+// download size and elapsed time. Returns "" when no size is known — the live
+// elapsed timer in the header carries the timing in that case. The rate is an
+// estimate: progress is item-weighted, not byte-exact, for most backends.
+func rateETA(st *srcState, frac float64, totalBytes int64) string {
+	if st == nil || totalBytes <= 0 {
+		return ""
+	}
+	downloaded := int64(clamp01(frac) * float64(totalBytes))
+	parts := []string{formatBytes(downloaded) + "/" + formatBytes(totalBytes)}
+	if el := st.elapsed().Seconds(); el > 0 && downloaded > 0 {
+		rate := float64(downloaded) / el
+		parts = append(parts, formatBytes(int64(rate))+"/s")
+		if remain := float64(totalBytes-downloaded) / rate; remain > 0 {
+			parts = append(parts, "ETA "+formatDuration(time.Duration(remain*float64(time.Second))))
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// applyColumns sizes the name / current / new columns for an apply panel,
+// reserving room for the leading status icon (1 col + space).
+func applyColumns(pkgs []core.Update, innerW int) (nameW, curW, newW int) {
+	const overhead = 1 + 1 + 2 + 3 // icon, space, gap, " → "
+	for _, u := range pkgs {
+		if w := lipgloss.Width(u.Name); w > nameW {
+			nameW = w
+		}
+		if w := lipgloss.Width(displayVersion(u.CurrentVersion)); w > curW {
+			curW = w
+		}
+		if w := lipgloss.Width(displayVersion(u.NewVersion)); w > newW {
+			newW = w
+		}
+	}
+	curW = min(curW, 10)
+	newW = min(newW, 12)
+
+	avail := max(innerW-overhead, 6)
+	nameW = max(min(nameW, avail-curW-newW), 4)
+	return nameW, curW, newW
+}
+
+// clampInt constrains v to [lo, hi]; if the range is empty, lo wins.
+func clampInt(v, lo, hi int) int {
+	if hi < lo {
+		return lo
+	}
+	return min(max(v, lo), hi)
+}
+
+// formatBytes renders a byte count in SI units (B/kB/MB/GB/…) via go-humanize,
+// matching how the package managers print download sizes. Zero or negative
+// renders empty so callers can omit unknown sizes (humanize.Bytes(0) is "0 B").
+func formatBytes(n int64) string {
+	if n <= 0 {
+		return ""
+	}
+	return humanize.Bytes(uint64(n))
+}
+
+// formatDuration renders a duration as m:ss (or h:mm:ss past an hour).
+func formatDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	s := int(d.Seconds() + 0.5)
+	if s >= 3600 {
+		return fmt.Sprintf("%d:%02d:%02d", s/3600, (s%3600)/60, s%60)
+	}
+	return fmt.Sprintf("%d:%02d", s/60, s%60)
+}
+
+// padLeft right-aligns s to a display width of w (width-aware).
+func padLeft(s string, w int) string {
+	if d := w - lipgloss.Width(s); d > 0 {
+		return strings.Repeat(" ", d) + s
+	}
+	return s
 }
 
 // progressBar renders a [████░░░░] bar of the given width for fraction f.
