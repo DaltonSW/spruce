@@ -23,7 +23,7 @@ func Execute(ctx context.Context) error {
 }
 
 func newRootCmd() *cobra.Command {
-	var yes bool
+	var opts tui.Options
 	root := &cobra.Command{
 		Use:   "spruce",
 		Short: "A pretty TUI front-end over your system's package-upgrade workflows",
@@ -39,12 +39,17 @@ func newRootCmd() *cobra.Command {
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
 
-			p := tea.NewProgram(tui.New(ctx, cancel, yes))
+			p := tea.NewProgram(tui.New(ctx, cancel, opts))
 			_, err := p.Run()
 			return err
 		},
 	}
-	root.Flags().BoolVarP(&yes, "yes", "y", false,
+	f := root.Flags()
+	f.BoolVarP(&opts.AutoYes, "yes", "y", false,
 		"apply all available updates without prompting")
+	f.BoolVar(&opts.DryRun, "dry-run", false,
+		"simulate the upgrade without changing anything")
+	f.BoolVar(&opts.Demo, "demo", false,
+		"run against fake backends to preview the UI (no system access)")
 	return root
 }

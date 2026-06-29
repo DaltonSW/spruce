@@ -31,6 +31,7 @@ type Plan struct {
 	Selected      []Update
 	DownloadBytes int64
 	NeedsRoot     bool // satisfied via polkit/snapd, not raw sudo
+	DryRun        bool // simulate the upgrade without mutating the system
 	// Anything the user should see before committing: extra deps pulled in,
 	// removals, warnings, etc.
 	Notes []string

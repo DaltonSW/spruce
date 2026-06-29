@@ -106,13 +106,22 @@ func (b Brew) Apply(ctx context.Context, plan core.Plan) (<-chan core.ProgressEv
 		}
 	}
 
+	base := []string{"brew", "upgrade"}
+	if plan.DryRun {
+		base = append(base, "--dry-run")
+	}
+
 	go func() {
 		defer close(events)
+		if plan.DryRun {
+			events <- core.ProgressEvent{Kind: core.EventLog, Source: "brew",
+				Text: "(dry run — nothing will be upgraded)"}
+		}
 		if len(formulae) > 0 {
-			b.runUpgrade(ctx, events, append([]string{"brew", "upgrade"}, formulae...))
+			b.runUpgrade(ctx, events, append(append([]string{}, base...), formulae...))
 		}
 		if len(casks) > 0 {
-			b.runUpgrade(ctx, events, append([]string{"brew", "upgrade", "--cask"}, casks...))
+			b.runUpgrade(ctx, events, append(append(append([]string{}, base...), "--cask"), casks...))
 		}
 		events <- core.ProgressEvent{Kind: core.EventDone, Source: "brew", OK: true}
 	}()

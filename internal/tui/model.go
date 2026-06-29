@@ -65,18 +65,25 @@ type Model struct {
 	progress map[string]*srcState
 	logs     []string // tail of raw log lines
 
-	// autoYes skips the Selecting/Reviewing gates: once discovery finishes we
-	// apply every default-selected (non-pinned) update straight away. Set by -y.
-	autoYes bool
+	// Flags from the CLI.
+	autoYes bool // -y: skip the gates and apply the default selection at once
+	demo    bool // --demo: use fake backends, no real system access
+	dryRun  bool // --dry-run: simulate the apply, mutating nothing
 
 	spinner int
 	ticking bool // whether a spinner tick loop is currently running
 }
 
+// Options carries the CLI flags that shape a run.
+type Options struct {
+	AutoYes bool
+	Demo    bool
+	DryRun  bool
+}
+
 // New builds the initial model. ctx is cancelled when the user quits, which
-// aborts any in-flight backend work. When autoYes is true the interactive gates
-// are skipped and all available updates are applied immediately.
-func New(ctx context.Context, cancel context.CancelFunc, autoYes bool) Model {
+// aborts any in-flight backend work.
+func New(ctx context.Context, cancel context.CancelFunc, opts Options) Model {
 	return Model{
 		ctx:         ctx,
 		cancel:      cancel,
@@ -88,13 +95,15 @@ func New(ctx context.Context, cancel context.CancelFunc, autoYes bool) Model {
 		progress:    map[string]*srcState{},
 		panelCursor: map[string]int{},
 		panelOffset: map[string]int{},
-		autoYes:     autoYes,
+		autoYes:     opts.AutoYes,
+		demo:        opts.Demo,
+		dryRun:      opts.DryRun,
 		ticking:     true, // Init starts a tick loop
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(availableCmd(), tickCmd())
+	return tea.Batch(availableCmd(m.demo), tickCmd())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -195,6 +204,8 @@ func (m Model) keySelecting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.setAll(true)
 	case "N":
 		m.setAll(false)
+	case "d":
+		m.dryRun = !m.dryRun
 	case "enter":
 		if m.anySelected() {
 			m.state = stateReviewing
@@ -249,9 +260,11 @@ func (m Model) keyReviewing(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "b", "n":
 		m.state = stateSelecting
+	case "d":
+		m.dryRun = !m.dryRun
 	case "y", "enter":
 		m.state = stateApplying
-		return m, tea.Batch(startApplyCmd(m.ctx, m.selectionByBackend(), m.byName), m.ensureTick())
+		return m, tea.Batch(startApplyCmd(m.ctx, m.selectionByBackend(), m.byName, m.dryRun), m.ensureTick())
 	case "q", "ctrl+c":
 		m.cancel()
 		return m, tea.Quit
@@ -310,7 +323,7 @@ func (m *Model) onCheckDone() (tea.Model, tea.Cmd) {
 	m.checkCh = nil
 	if m.autoYes && m.anySelected() {
 		m.state = stateApplying
-		return *m, tea.Batch(startApplyCmd(m.ctx, m.selectionByBackend(), m.byName), m.ensureTick())
+		return *m, tea.Batch(startApplyCmd(m.ctx, m.selectionByBackend(), m.byName, m.dryRun), m.ensureTick())
 	}
 	return *m, nil
 }

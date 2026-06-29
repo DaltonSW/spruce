@@ -34,9 +34,12 @@ type tickMsg struct{}
 
 // availableCmd detects which backends exist (fast: stat/lookpath/dbus). This is
 // reported first so every panel can appear immediately, before the slower
-// per-backend Check runs.
-func availableCmd() tea.Cmd {
+// per-backend Check runs. In demo mode it returns fake backends instead.
+func availableCmd(demo bool) tea.Cmd {
 	return func() tea.Msg {
+		if demo {
+			return availableMsg{backends: backend.DemoBackends()}
+		}
 		return availableMsg{backends: backend.Available()}
 	}
 }
@@ -88,7 +91,7 @@ func waitForEvent(ch <-chan core.ProgressEvent) tea.Cmd {
 // startApplyCmd resolves a Plan per backend, starts Apply on each, and fans all
 // their event channels into one aggregated channel. Plan/Apply may block, so
 // this all runs inside the command goroutine, not the UI loop.
-func startApplyCmd(ctx context.Context, sel map[string][]core.Update, byName map[string]core.Backend) tea.Cmd {
+func startApplyCmd(ctx context.Context, sel map[string][]core.Update, byName map[string]core.Backend, dryRun bool) tea.Cmd {
 	return func() tea.Msg {
 		agg := make(chan core.ProgressEvent, 128)
 		var wg sync.WaitGroup
@@ -103,6 +106,7 @@ func startApplyCmd(ctx context.Context, sel map[string][]core.Update, byName map
 				agg <- core.ProgressEvent{Kind: core.EventError, Source: name, Text: err.Error()}
 				continue
 			}
+			plan.DryRun = dryRun
 			ch, err := b.Apply(ctx, plan)
 			if err != nil {
 				agg <- core.ProgressEvent{Kind: core.EventError, Source: name, Text: err.Error()}

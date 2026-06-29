@@ -19,6 +19,11 @@ const (
 	pkService  = "org.freedesktop.PackageKit"
 	pkRootPath = "/org/freedesktop/PackageKit"
 	pkTxIface  = "org.freedesktop.PackageKit.Transaction"
+
+	// Pk transaction flags. SIMULATE resolves what would change and emits the
+	// Package signals without installing — a safe, repeatable dry run.
+	pkFlagNone     = uint64(0)
+	pkFlagSimulate = uint64(1 << 1)
 )
 
 func (PackageKit) Name() string { return "system" }
@@ -181,9 +186,16 @@ func (PackageKit) Apply(ctx context.Context, plan core.Plan) (<-chan core.Progre
 			return
 		}
 
-		// transaction_flags=0, the package_ids to update. polkit prompts here.
+		flags := pkFlagNone
+		if plan.DryRun {
+			flags = pkFlagSimulate // resolves only; no polkit prompt, no changes
+			events <- core.ProgressEvent{Kind: core.EventLog, Source: "system",
+				Text: "(dry run — simulating, nothing will change)"}
+		}
+
+		// the package_ids to update. polkit prompts here unless simulating.
 		err = runTransaction(ctx, conn, tpath,
-			pkTxIface+".UpdatePackages", []any{uint64(0), ids},
+			pkTxIface+".UpdatePackages", []any{flags, ids},
 			func(name string, body []any) {
 				switch name {
 				case "Package":

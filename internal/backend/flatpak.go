@@ -84,12 +84,20 @@ func (f Flatpak) Apply(ctx context.Context, plan core.Plan) (<-chan core.Progres
 	events := make(chan core.ProgressEvent, 64)
 
 	argv := []string{"flatpak", "update", "-y", "--noninteractive"}
+	if plan.DryRun {
+		// --no-deploy fetches the update but never deploys it: safe & repeatable.
+		argv = append(argv, "--no-deploy")
+	}
 	for _, u := range plan.Selected {
 		argv = append(argv, u.Name)
 	}
 
 	go func() {
 		defer close(events)
+		if plan.DryRun {
+			events <- core.ProgressEvent{Kind: core.EventLog, Source: "flatpak",
+				Text: "(dry run — fetching only, not deploying)"}
+		}
 		chunks, done := ptyrun.Stream(ctx, argv, ptyrun.Options{Env: envBase(), IdleTimeoutMS: 5000})
 
 		var carry string

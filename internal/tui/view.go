@@ -84,9 +84,10 @@ func (m Model) viewSelecting() string {
 	if n := len(m.checking); n > 0 {
 		status += dimStyle.Render(fmt.Sprintf("  ·  %s checking %d…", m.spin(), n))
 	}
+	status += m.dryRunBadge()
 	b.WriteString(status + "\n")
 	b.WriteString(helpStyle.Render(
-		"↑/↓ move · ←/→/tab panel · space toggle · a all · N none · enter review · q quit"))
+		"↑/↓ move · ←/→/tab panel · space toggle · a all · N none · d dry-run · enter review · q quit"))
 	return b.String()
 }
 
@@ -460,7 +461,7 @@ func (m Model) reviewModal() string {
 			fmt.Sprintf("%d package%s", n, plural(n))))
 	}
 
-	body := []string{titleStyle.Render("Apply updates?"), ""}
+	body := []string{titleStyle.Render("Apply updates?") + m.dryRunBadge(), ""}
 	if total == 0 {
 		body = append(body, dimStyle.Render("Nothing selected."))
 	} else {
@@ -470,7 +471,7 @@ func (m Model) reviewModal() string {
 				okStyle.Render(fmt.Sprintf("%d package%s", total, plural(total))),
 				len(rows), plural(len(rows))))
 	}
-	body = append(body, "", helpStyle.Render("enter/y apply   ·   esc cancel"))
+	body = append(body, "", helpStyle.Render("enter/y apply   ·   d dry run   ·   esc cancel"))
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -478,6 +479,14 @@ func (m Model) reviewModal() string {
 		Background(lipgloss.Color("236")).
 		Padding(1, 3).
 		Render(lipgloss.JoinVertical(lipgloss.Left, body...))
+}
+
+// dryRunBadge returns a " DRY RUN" tag for the headers when simulating.
+func (m Model) dryRunBadge() string {
+	if !m.dryRun {
+		return ""
+	}
+	return "  " + pinStyle.Render("DRY RUN")
 }
 
 func plural(n int) string {
@@ -507,7 +516,7 @@ func (m Model) viewApplying() string {
 	if m.state == stateDone {
 		header = "Done"
 	}
-	b.WriteString(titleStyle.Render(header) + "\n\n")
+	b.WriteString(titleStyle.Render(header) + m.dryRunBadge() + "\n\n")
 
 	// Per-source status lines, in a stable order.
 	for _, name := range m.orderedSources() {

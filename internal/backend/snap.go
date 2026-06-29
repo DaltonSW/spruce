@@ -102,6 +102,19 @@ func (s Snap) Apply(ctx context.Context, plan core.Plan) (<-chan core.ProgressEv
 	go func() {
 		defer close(events)
 
+		// snapd has no simulate mode, so dry run just reports intent.
+		if plan.DryRun {
+			for _, n := range names {
+				events <- core.ProgressEvent{Kind: core.EventPhase, Source: "snap",
+					Item: n, Phase: "Would refresh"}
+				events <- core.ProgressEvent{Kind: core.EventItemDone, Source: "snap", OK: true}
+			}
+			events <- core.ProgressEvent{Kind: core.EventLog, Source: "snap",
+				Text: "(dry run — snapd not contacted)"}
+			events <- core.ProgressEvent{Kind: core.EventDone, Source: "snap", OK: true}
+			return
+		}
+
 		// Kick off an async refresh of the selected snaps.
 		body, _ := json.Marshal(map[string]any{"action": "refresh", "snaps": names})
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost,

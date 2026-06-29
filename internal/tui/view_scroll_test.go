@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"go.dalton.dog/spruce/internal/core"
@@ -14,7 +15,7 @@ import (
 // gridModel builds a Selecting model with a large System backend plus a few
 // small ones, mirroring the real "200+ packages" case.
 func gridModel(counts map[string]int) Model {
-	m := New(context.TODO(), func() {}, false)
+	m := New(context.TODO(), func() {}, Options{})
 	m.state = stateSelecting
 	m.width, m.height = 100, 30
 	for _, src := range []string{"system", "brew", "flatpak", "snap"} {
@@ -113,7 +114,7 @@ func (fakeBackend) Apply(context.Context, core.Plan) (<-chan core.ProgressEvent,
 // Streaming discovery: panels appear (as spinners) on availableMsg, then a
 // backend's panel fills in only once its checkedMsg arrives.
 func TestStreamingDiscovery(t *testing.T) {
-	m := New(context.TODO(), func() {}, false)
+	m := New(context.TODO(), func() {}, Options{})
 	m.width, m.height = 100, 30
 
 	backends := []core.Backend{fakeBackend{"system"}, fakeBackend{"brew"}}
@@ -187,6 +188,30 @@ func TestReviewModal(t *testing.T) {
 		if w := lipgloss.Width(ln); w > m.width {
 			t.Errorf("review line %d width %d exceeds %d", i, w, m.width)
 		}
+	}
+}
+
+// Dry run is toggleable from the UI and reflected with a badge.
+func TestDryRunToggle(t *testing.T) {
+	m := gridModel(map[string]int{"system": 5, "brew": 2})
+	if m.dryRun {
+		t.Fatal("dry run should default off")
+	}
+	d := tea.KeyPressMsg{Code: 'd', Text: "d"}
+
+	tm, _ := m.keySelecting(d)
+	m = tm.(Model)
+	if !m.dryRun {
+		t.Fatal("d should enable dry run")
+	}
+	if !strings.Contains(m.viewSelecting(), "DRY RUN") {
+		t.Errorf("badge should appear when dry run is on:\n%s", m.viewSelecting())
+	}
+
+	tm, _ = m.keySelecting(d)
+	m = tm.(Model)
+	if m.dryRun {
+		t.Fatal("d should toggle dry run back off")
 	}
 }
 
