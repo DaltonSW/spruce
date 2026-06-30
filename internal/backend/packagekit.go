@@ -20,11 +20,20 @@ const (
 	pkRootPath = "/org/freedesktop/PackageKit"
 	pkTxIface  = "org.freedesktop.PackageKit.Transaction"
 
-	// Pk transaction flag for a real upgrade. We deliberately do NOT use the
-	// SIMULATE flag for dry runs: the dnf5 PackageKit backend has been observed
-	// to ignore it and apply the transaction for real, so dry runs never call
-	// the mutating UpdatePackages method at all (see Apply).
-	pkFlagNone = uint64(0)
+	// pkFlagOnlyTrusted (PK_TRANSACTION_FLAG_ENUM_ONLY_TRUSTED) is REQUIRED for a
+	// real upgrade. Without it PackageKit treats the transaction as installing
+	// UNTRUSTED packages and demands the org.freedesktop.packagekit.
+	// package-install-untrusted polkit authorization, which the standard auth
+	// agent won't grant — so the update fails instantly ("failed to obtain
+	// auth"). Every Fedora repo package is GPG-signed, so requiring trust is
+	// correct here; it's the same flag dnf and GNOME Software use, and it routes
+	// to the grantable system-update/package-install action instead.
+	//
+	// We deliberately do NOT add the SIMULATE flag for dry runs: the dnf5
+	// PackageKit backend has been observed to ignore it and apply the transaction
+	// for real, so dry runs never call the mutating UpdatePackages method at all
+	// (see Apply).
+	pkFlagOnlyTrusted = uint64(1 << 0)
 
 	// Pk filter bitfield. Unlike the transaction flag above (whose enum values
 	// are already bit positions), the filter enum is sequential (UNKNOWN=0,
@@ -323,7 +332,7 @@ func (PackageKit) Apply(ctx context.Context, plan core.Plan) (<-chan core.Progre
 		// A real upgrade: polkit prompts here. (Dry runs returned above and never
 		// reach this mutating call.)
 		err = runTransaction(ctx, conn, tpath,
-			pkTxIface+".UpdatePackages", []any{pkFlagNone, ids},
+			pkTxIface+".UpdatePackages", []any{pkFlagOnlyTrusted, ids},
 			func(name string, body []any) {
 				switch name {
 				case "Package":

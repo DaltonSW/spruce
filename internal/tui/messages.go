@@ -30,6 +30,7 @@ type checkDoneMsg struct{}
 type applyReadyMsg struct{ ch <-chan core.ProgressEvent }
 type applyEventMsg struct{ ev core.ProgressEvent }
 type applyDoneMsg struct{}
+type plansResolvedMsg struct{ plans map[string]core.Plan }
 type tickMsg struct{}
 
 // --- commands --------------------------------------------------------------
@@ -90,22 +91,52 @@ func waitForEvent(ch <-chan core.ProgressEvent) tea.Cmd {
 	}
 }
 
-// startApplyCmd resolves a Plan per backend, starts Apply on each, and fans all
-// their event channels into one aggregated channel. Plan/Apply may block, so
-// this all runs inside the command goroutine, not the UI loop.
-func startApplyCmd(ctx context.Context, sel map[string][]core.Update, byName map[string]core.Backend, dryRun bool) tea.Cmd {
+// resolvePlansCmd resolves a Plan for every selected backend concurrently. Plan
+// is read-only but may be slow (brew shells out to `brew upgrade --dry-run` to
+// learn the pulled-in dependents), so it runs off the UI loop. The result feeds
+// the review/confirm screens (notes, sizes) and is reused as the input to Apply,
+// so each backend is planned exactly once per run.
+func resolvePlansCmd(ctx context.Context, sel map[string][]core.Update, byName map[string]core.Backend) tea.Cmd {
 	return func() tea.Msg {
-		agg := make(chan core.ProgressEvent, 128)
+		plans := map[string]core.Plan{}
+		var mu sync.Mutex
 		var wg sync.WaitGroup
-
 		for name, ups := range sel {
 			b := byName[name]
 			if b == nil || len(ups) == 0 {
 				continue
 			}
-			plan, err := b.Plan(ctx, ups)
-			if err != nil {
-				agg <- core.ProgressEvent{Kind: core.EventError, Source: name, Text: err.Error()}
+			wg.Add(1)
+			go func(name string, b core.Backend, ups []core.Update) {
+				defer wg.Done()
+				p, err := b.Plan(ctx, ups)
+				if err != nil {
+					// Keep the selection so Apply can still proceed; surface the
+					// failure as a note rather than dropping the backend.
+					p = core.Plan{Backend: name, Selected: ups,
+						Notes: []string{"could not preview: " + err.Error()}}
+				}
+				mu.Lock()
+				plans[name] = p
+				mu.Unlock()
+			}(name, b, ups)
+		}
+		wg.Wait()
+		return plansResolvedMsg{plans: plans}
+	}
+}
+
+// startApplyCmd starts Apply on each pre-resolved plan and fans all their event
+// channels into one aggregated channel. Plans come from resolvePlansCmd, so this
+// never re-runs Plan; Apply may block, so it all runs in the command goroutine.
+func startApplyCmd(ctx context.Context, plans map[string]core.Plan, byName map[string]core.Backend, dryRun bool) tea.Cmd {
+	return func() tea.Msg {
+		agg := make(chan core.ProgressEvent, 128)
+		var wg sync.WaitGroup
+
+		for name, plan := range plans {
+			b := byName[name]
+			if b == nil || len(plan.Selected) == 0 {
 				continue
 			}
 			plan.DryRun = dryRun

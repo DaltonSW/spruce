@@ -118,6 +118,17 @@ type Model struct {
 	// of Model share the same table state.
 	tables map[string]*table.Model
 
+	// Reviewing / ConfirmInstall
+	// plans holds the resolved Plan per backend for the current confirm screen,
+	// reused as the input to Apply so each backend is planned once. planning is
+	// true while resolvePlansCmd is in flight (the modal shows a spinner).
+	plans    map[string]core.Plan
+	planning bool
+	// planCache memoizes resolved single-package plans (keyed by Update.ID()) so
+	// re-opening a package's install-one modal skips the brew dry-run. Cleared on
+	// restartChecks so versions can't go stale across runs.
+	planCache map[string]core.Plan
+
 	// Applying
 	applyCh  <-chan core.ProgressEvent
 	progress map[string]*srcState
@@ -161,23 +172,24 @@ func New(ctx context.Context, cancel context.CancelFunc, opts Options) Model {
 	}))
 
 	return Model{
-		ctx:      ctx,
-		cancel:   cancel,
-		state:    stateDiscovering,
-		keys:     defaultKeys(),
-		help:     h,
-		spinner:  sp,
-		byName:   map[string]core.Backend{},
-		errs:     map[string]string{},
-		checking: map[string]bool{},
-		selected: map[string]bool{},
-		progress: map[string]*srcState{},
-		tables:   map[string]*table.Model{},
-		autoYes:  opts.AutoYes,
-		demo:     opts.Demo,
-		dryRun:   opts.DryRun,
-		ticking:  true, // Init starts the gradient tick loop
-		spinning: true, // Init starts the spinner tick loop
+		ctx:       ctx,
+		cancel:    cancel,
+		state:     stateDiscovering,
+		keys:      defaultKeys(),
+		help:      h,
+		spinner:   sp,
+		byName:    map[string]core.Backend{},
+		errs:      map[string]string{},
+		checking:  map[string]bool{},
+		selected:  map[string]bool{},
+		progress:  map[string]*srcState{},
+		tables:    map[string]*table.Model{},
+		planCache: map[string]core.Plan{},
+		autoYes:   opts.AutoYes,
+		demo:      opts.Demo,
+		dryRun:    opts.DryRun,
+		ticking:   true, // Init starts the gradient tick loop
+		spinning:  true, // Init starts the spinner tick loop
 	}
 }
 
@@ -188,7 +200,8 @@ func (m Model) Init() tea.Cmd {
 // animating reports whether anything on screen needs the spinner/gradient
 // ticking: discovery, an in-flight Check, or an apply in progress.
 func (m Model) animating() bool {
-	return m.state == stateDiscovering || m.state == stateApplying || len(m.checking) > 0
+	return m.state == stateDiscovering || m.state == stateApplying ||
+		m.planning || len(m.checking) > 0
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -244,9 +257,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case applyDoneMsg:
 		m.state = stateDone
 		return m, nil
+
+	case plansResolvedMsg:
+		return m.onPlansResolved(msg)
 	}
 
 	return m, nil
+}
+
+// onPlansResolved stores the resolved plans for the confirm screens and derives
+// the apply selection from them. If the user already committed to apply (the -y
+// fast path, or Apply pressed before planning finished), it launches the apply
+// now that plans are in hand.
+func (m Model) onPlansResolved(msg plansResolvedMsg) (tea.Model, tea.Cmd) {
+	m.plans = msg.plans
+	m.planning = false
+	m.applying = map[string][]core.Update{}
+	for name, p := range m.plans {
+		m.applying[name] = p.Selected
+		// Cache single-package plans so re-opening that package's install-one
+		// modal is instant (its brew dry-run won't re-run). Keyed by Update.ID().
+		if len(p.Selected) == 1 {
+			m.planCache[p.Selected[0].ID()] = p
+		}
+	}
+	if m.state == stateApplying && m.applyCh == nil {
+		return m, tea.Batch(startApplyCmd(m.ctx, m.plans, m.byName, m.dryRun), m.ensureTick())
+	}
+	return m, nil
+}
+
+// beginApply transitions into Applying. When plans are still resolving it parks
+// in Applying and lets onPlansResolved launch the run; otherwise it starts
+// immediately from the already-resolved plans.
+func (m Model) beginApply() (tea.Model, tea.Cmd) {
+	m.state = stateApplying
+	if m.planning {
+		return m, m.ensureTick()
+	}
+	return m, tea.Batch(startApplyCmd(m.ctx, m.plans, m.byName, m.dryRun), m.ensureTick())
 }
 
 func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -291,6 +340,9 @@ func (m Model) restartChecks() (tea.Model, tea.Cmd) {
 	m.errs = map[string]string{}
 	m.progress = map[string]*srcState{}
 	m.applying = nil
+	m.plans = nil
+	m.planning = false
+	m.planCache = map[string]core.Plan{}
 	m.applyCh = nil
 	m.focus = 0
 	m.tables = map[string]*table.Model{} // fresh tables: cursor/scroll start at top
@@ -347,15 +399,58 @@ func (m Model) keySelecting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Review):
 		if m.anySelected() {
 			m.state = stateReviewing
+			return m.startPlanning(m.selectionByBackend())
 		}
 	case key.Matches(msg, m.keys.Install):
 		if r, ok := m.currentRow(); ok {
 			rr := r
 			m.installTarget = &rr
 			m.state = stateConfirmInstall
+			// Clear Pinned on the copy so backends that skip pinned items in
+			// Apply (e.g. brew) honor this explicit per-package override.
+			u := rr.update
+			u.Pinned = false
+			return m.startPlanning(map[string][]core.Update{rr.source: {u}})
 		}
 	}
 	return m, nil
+}
+
+// startPlanning resolves the Plan for the given selection. A fully-cached
+// selection (the common case once an install-one modal has been opened before)
+// is served instantly with no spinner; otherwise it marks the confirm screen
+// busy and resolves in the background until plansResolvedMsg lands.
+func (m Model) startPlanning(sel map[string][]core.Update) (tea.Model, tea.Cmd) {
+	if plans, ok := m.cachedPlans(sel); ok {
+		m.plans = plans
+		m.planning = false
+		return m, nil
+	}
+	m.plans = nil
+	m.planning = true
+	return m, tea.Batch(resolvePlansCmd(m.ctx, sel, m.byName), m.ensureTick())
+}
+
+// cachedPlans returns the cached Plans for a selection, succeeding only when
+// every backend's selection is a single package whose plan is already cached.
+// This targets the install-one modal (one package, one backend); multi-package
+// review selections miss and resolve fresh.
+func (m Model) cachedPlans(sel map[string][]core.Update) (map[string]core.Plan, bool) {
+	out := make(map[string]core.Plan, len(sel))
+	for name, ups := range sel {
+		if len(ups) != 1 {
+			return nil, false
+		}
+		p, ok := m.planCache[ups[0].ID()]
+		if !ok {
+			return nil, false
+		}
+		out[name] = p
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
 }
 
 // moveInPanel applies a movement to the focused panel's table, then resyncs that
@@ -386,9 +481,7 @@ func (m Model) keyReviewing(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.DryRun):
 		m.dryRun = !m.dryRun
 	case key.Matches(msg, m.keys.Apply):
-		m.applying = m.selectionByBackend()
-		m.state = stateApplying
-		return m, tea.Batch(startApplyCmd(m.ctx, m.applying, m.byName, m.dryRun), m.ensureTick())
+		return m.beginApply()
 	case key.Matches(msg, m.keys.Quit):
 		m.cancel()
 		return m, tea.Quit
@@ -406,19 +499,8 @@ func (m Model) keyConfirmInstall(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.DryRun):
 		m.dryRun = !m.dryRun
 	case key.Matches(msg, m.keys.Apply):
-		t := m.installTarget
 		m.installTarget = nil
-		if t == nil {
-			m.state = stateSelecting
-			return m, nil
-		}
-		// Clear Pinned on the copy so backends that skip pinned items in Apply
-		// (e.g. brew) honor this explicit per-package override.
-		u := t.update
-		u.Pinned = false
-		m.applying = map[string][]core.Update{t.source: {u}}
-		m.state = stateApplying
-		return m, tea.Batch(startApplyCmd(m.ctx, m.applying, m.byName, m.dryRun), m.ensureTick())
+		return m.beginApply()
 	case key.Matches(msg, m.keys.Quit):
 		m.cancel()
 		return m, tea.Quit
@@ -483,9 +565,11 @@ func (m *Model) onChecked(msg checkedMsg) (tea.Model, tea.Cmd) {
 func (m *Model) onCheckDone() (tea.Model, tea.Cmd) {
 	m.checkCh = nil
 	if m.autoYes && m.anySelected() {
-		m.applying = m.selectionByBackend()
+		// Resolve plans first (onPlansResolved launches the apply); this parks in
+		// Applying so the spinner shows while brew's dry-run preview runs.
+		m.planning = true
 		m.state = stateApplying
-		return *m, tea.Batch(startApplyCmd(m.ctx, m.applying, m.byName, m.dryRun), m.ensureTick())
+		return *m, tea.Batch(resolvePlansCmd(m.ctx, m.selectionByBackend(), m.byName), m.ensureTick())
 	}
 	return *m, nil
 }

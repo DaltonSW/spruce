@@ -713,6 +713,7 @@ func (m Model) installModal() string {
 		}
 		body = append(body, dimStyle.Render(ver))
 	}
+	body = append(body, m.planLines()...)
 	body = append(body, "", m.help.ShortHelpView(m.keys.confirmInstallHelp()))
 
 	content := withModalBg(lipgloss.JoinVertical(lipgloss.Left, body...), colModalBg)
@@ -722,6 +723,30 @@ func (m Model) installModal() string {
 		Background(lipgloss.Color(colModalBg)).
 		Padding(1, 3).
 		Render(content)
+}
+
+// planLines renders the resolved-Plan section shared by both confirm modals: a
+// spinner while plans resolve, then any backend Notes (e.g. brew's pulled-in
+// dependents). Returns nil when there's nothing to show, so callers can append
+// it unconditionally. The leading blank keeps it spaced from the summary above.
+func (m Model) planLines() []string {
+	if m.planning {
+		return []string{"", dimStyle.Render(m.spinner.View() + " resolving dependencies…")}
+	}
+	var notes []string
+	for _, s := range m.panelSources() {
+		if p, ok := m.plans[s]; ok {
+			notes = append(notes, p.Notes...)
+		}
+	}
+	if len(notes) == 0 {
+		return nil
+	}
+	out := []string{""}
+	for _, n := range notes {
+		out = append(out, dimStyle.Render(n))
+	}
+	return out
 }
 
 // reviewModal is the floating confirmation box: one line per backend with its
@@ -766,6 +791,7 @@ func (m Model) reviewModal() string {
 		}
 		body = append(body, "", summary)
 	}
+	body = append(body, m.planLines()...)
 	body = append(body, "", m.help.ShortHelpView(m.keys.reviewingHelp()))
 
 	// withModalBg patches the joined content so the modal background survives the
