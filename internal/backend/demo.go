@@ -91,7 +91,10 @@ func (d demoBackend) Apply(ctx context.Context, plan core.Plan) (<-chan core.Pro
 			}
 			sleep(ctx, 120*time.Millisecond)
 
-			if d.failApply && i == len(plan.Selected)/2 {
+			// Fail "partway" only when there's more than one item — a one-off
+			// install of a single package has no midpoint to fail at, and should
+			// be allowed to succeed.
+			if d.failApply && len(plan.Selected) > 1 && i == len(plan.Selected)/2 {
 				emit(core.ProgressEvent{Kind: core.EventError, Text: "simulated failure during install"})
 				emit(core.ProgressEvent{Kind: core.EventDone})
 				return

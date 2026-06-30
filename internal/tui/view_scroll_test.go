@@ -371,10 +371,11 @@ func TestDryRunToggle(t *testing.T) {
 // to keep the active item in view, and still fits the terminal.
 func TestApplyPanelListsPackages(t *testing.T) {
 	m := gridModel(map[string]int{"system": 40, "brew": 3})
+	m.applying = m.selectionByBackend()
 	m.state = stateApplying
 
 	// System is mid-apply: 5 done, currently working on #7; brew not started.
-	sysPkgs := m.selectionByBackend()["system"]
+	sysPkgs := m.applying["system"]
 	m.progress["system"] = &srcState{
 		done:     5,
 		item:     sysPkgs[7].Name,
@@ -478,8 +479,9 @@ func TestSizeAndTimingDisplay(t *testing.T) {
 	// Apply: per-row size, active-row live download note, header timer, footer ETA.
 	// Widen so the active row's full note fits (it truncates in narrow panels).
 	m.width = 160
+	m.applying = m.selectionByBackend()
 	m.state = stateApplying
-	sysPkgs := m.selectionByBackend()["system"]
+	sysPkgs := m.applying["system"]
 	st := &srcState{done: 3, fraction: 0.5, phase: "Downloading", item: sysPkgs[3].Name}
 	st.started = time.Now().Add(-10 * time.Second)
 	st.markSeen(sysPkgs[3].Name)

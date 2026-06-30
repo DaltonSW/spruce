@@ -21,12 +21,14 @@ type keyMap struct {
 	All      key.Binding
 	None     key.Binding
 	DryRun   key.Binding
+	Install  key.Binding
 	Review   key.Binding
 	Apply    key.Binding
 	Back     key.Binding
 	Quit     key.Binding
 	Cancel   key.Binding
 	QuitDone key.Binding
+	More     key.Binding
 }
 
 // defaultKeys mirrors the bindings (and footer wording) the TUI used when these
@@ -50,23 +52,31 @@ func defaultKeys() keyMap {
 		All:      key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "all")),
 		None:     key.NewBinding(key.WithKeys("N"), key.WithHelp("N", "none")),
 		DryRun:   key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "dry-run")),
+		Install:  key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "install one")),
 		Review:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "review")),
 		Apply:    key.NewBinding(key.WithKeys("y", "enter"), key.WithHelp("enter/y", "apply")),
 		Back:     key.NewBinding(key.WithKeys("esc", "b", "n"), key.WithHelp("esc", "cancel")),
 		Quit:     key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		Cancel:   key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "cancel")),
-		QuitDone: key.NewBinding(key.WithKeys("q", "enter", "esc"), key.WithHelp("q/enter", "quit")),
+		QuitDone: key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q", "quit")),
+		More:     key.NewBinding(key.WithKeys("enter", "r"), key.WithHelp("enter", "more updates")),
 	}
 }
 
 // Footer help, one slice per state — only the bindings that should appear, in
 // display order. help.Model renders each as "<key> <desc>" joined by " · ".
 
+// selectingHelp omits None (the N key still works) to keep the footer within a
+// 100-col terminal once Install is advertised.
 func (k keyMap) selectingHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Right, k.Toggle, k.All, k.None, k.DryRun, k.Review, k.Quit}
+	return []key.Binding{k.Up, k.Right, k.Toggle, k.All, k.DryRun, k.Install, k.Review, k.Quit}
 }
 
 func (k keyMap) reviewingHelp() []key.Binding {
+	return []key.Binding{k.Apply, k.DryRun, k.Back}
+}
+
+func (k keyMap) confirmInstallHelp() []key.Binding {
 	return []key.Binding{k.Apply, k.DryRun, k.Back}
 }
 
@@ -75,5 +85,5 @@ func (k keyMap) applyingHelp() []key.Binding {
 }
 
 func (k keyMap) doneHelp() []key.Binding {
-	return []key.Binding{k.QuitDone}
+	return []key.Binding{k.More, k.QuitDone}
 }

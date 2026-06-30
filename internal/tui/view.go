@@ -73,6 +73,9 @@ var (
 	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(colErr))
 	cursorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colAccent)).Bold(true)
 	helpStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(colHelp))
+	// helpKeyStyle styles the footer keycaps: bold accent so the actionable keys
+	// pop, while the action labels (dimStyle) and separators (helpStyle) recede.
+	helpKeyStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(colAccent))
 )
 
 func (m Model) View() tea.View {
@@ -84,6 +87,8 @@ func (m Model) View() tea.View {
 		body = m.viewSelecting()
 	case stateReviewing:
 		body = m.viewReviewing()
+	case stateConfirmInstall:
+		body = m.viewConfirmInstall()
 	case stateApplying, stateDone:
 		body = m.viewApplying()
 	}
@@ -675,6 +680,50 @@ func (m Model) viewReviewing() string {
 	return lipgloss.NewCompositor(bg, fg).Render()
 }
 
+// viewConfirmInstall floats the single-package install confirmation (the (i)
+// flow) over the Selecting grid, reusing the review-modal layering.
+func (m Model) viewConfirmInstall() string {
+	backdrop := m.viewSelecting()
+	modal := m.installModal()
+
+	x := max((m.width-lipgloss.Width(modal))/2, 0)
+	y := max((lipgloss.Height(backdrop)-lipgloss.Height(modal))/2, 0)
+
+	bg := lipgloss.NewLayer(backdrop)
+	fg := lipgloss.NewLayer(modal).X(x).Y(y).Z(1)
+	return lipgloss.NewCompositor(bg, fg).Render()
+}
+
+// installModal is the floating confirmation box for installing just the hovered
+// package: backend, name, version transition, and download size.
+func (m Model) installModal() string {
+	body := []string{titleStyle.Render("Install this package?") + m.dryRunBadge(), ""}
+	if m.installTarget == nil {
+		body = append(body, dimStyle.Render("Nothing selected."))
+	} else {
+		t := m.installTarget
+		u := t.update
+		line := fmt.Sprintf("%s  %s",
+			padRight(groupStyle.Render(strings.ToUpper(t.source)), 10),
+			u.Name)
+		body = append(body, line)
+		ver := fmt.Sprintf("%s → %s", u.CurrentVersion, u.NewVersion)
+		if u.SizeBytes > 0 {
+			ver += dimStyle.Render(sep + formatBytes(u.SizeBytes) + " to download")
+		}
+		body = append(body, dimStyle.Render(ver))
+	}
+	body = append(body, "", m.help.ShortHelpView(m.keys.confirmInstallHelp()))
+
+	content := withModalBg(lipgloss.JoinVertical(lipgloss.Left, body...), colModalBg)
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(colAccent)).
+		Background(lipgloss.Color(colModalBg)).
+		Padding(1, 3).
+		Render(content)
+}
+
 // reviewModal is the floating confirmation box: one line per backend with its
 // count, a total, and the confirm/cancel hint.
 func (m Model) reviewModal() string {
@@ -781,7 +830,7 @@ func (m Model) viewApplying() string {
 	}
 
 	// Each apply panel is sized to the number of packages it's applying.
-	sel := m.selectionByBackend()
+	sel := m.applying
 	content := make([]int, len(srcs))
 	for i, s := range srcs {
 		content[i] = max(len(sel[s]), 1)
@@ -819,7 +868,7 @@ func (m Model) viewApplying() string {
 // appliedSources is the set of backends in this apply run — those with a
 // selection — in stable display order.
 func (m Model) appliedSources() []string {
-	sel := m.selectionByBackend()
+	sel := m.applying
 	var out []string
 	for _, s := range m.panelSources() {
 		if len(sel[s]) > 0 {
@@ -895,7 +944,7 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 	innerH := max(totalH-2, 1)
 	contentW := max(innerW-panelGutter, 4)
 	st := m.progress[src]
-	pkgs := m.selectionByBackend()[src]
+	pkgs := m.applying[src]
 	total := len(pkgs)
 
 	done := 0

@@ -21,6 +21,7 @@ const (
 	stateDiscovering state = iota
 	stateSelecting
 	stateReviewing
+	stateConfirmInstall
 	stateApplying
 	stateDone
 )
@@ -108,6 +109,10 @@ type Model struct {
 	selected   map[string]bool // keyed by Update.ID()
 	focus      int             // index into panels()
 
+	// installTarget is the single package to install when in stateConfirmInstall
+	// (the (i) flow). Independent of the m.selected multi-selection.
+	installTarget *row
+
 	// One table per backend owns that panel's cursor + scroll; spruce keeps
 	// selection (m.selected) and styling external. Pointers, so all value-copies
 	// of Model share the same table state.
@@ -116,6 +121,10 @@ type Model struct {
 	// Applying
 	applyCh  <-chan core.ProgressEvent
 	progress map[string]*srcState
+	// applying is the exact selection handed to this apply run, grouped by
+	// backend. The apply view reads this (not m.selected) so the (i) single-package
+	// flow shows only the package it's installing, not the whole default selection.
+	applying map[string][]core.Update
 
 	// Flags from the CLI.
 	autoYes bool // -y: skip the gates and apply the default selection at once
@@ -139,10 +148,11 @@ type Options struct {
 func New(ctx context.Context, cancel context.CancelFunc, opts Options) Model {
 	h := help.New()
 	h.ShortSeparator = " · " // match the footer joiner the TUI has always used
-	// Render the whole footer in one uniform dim grey, as the literal help
-	// strings did, rather than the bubble's brighter key/dimmer desc default.
-	h.Styles.ShortKey = helpStyle
-	h.Styles.ShortDesc = helpStyle
+	// Give the footer visual hierarchy: bold accent keycaps so the actionable
+	// keys pop, dim labels beside them, and the faintest grey for the · joiners —
+	// so the footer reads clearly instead of blending into the status line above.
+	h.Styles.ShortKey = helpKeyStyle
+	h.Styles.ShortDesc = dimStyle
 	h.Styles.ShortSeparator = helpStyle
 
 	sp := spinner.New(spinner.WithSpinner(spinner.Spinner{
@@ -250,12 +260,47 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.keySelecting(msg)
 	case stateReviewing:
 		return m.keyReviewing(msg)
+	case stateConfirmInstall:
+		return m.keyConfirmInstall(msg)
 	case stateDone:
+		if key.Matches(msg, m.keys.More) {
+			return m.restartChecks()
+		}
 		if key.Matches(msg, m.keys.QuitDone) {
 			return m, tea.Quit
 		}
 	}
 	return m, nil
+}
+
+// restartChecks returns from the Done screen to a fresh Selecting list, re-running
+// Check across every discovered backend so the just-applied updates drop off and
+// the user sees what's still available to update.
+func (m Model) restartChecks() (tea.Model, tea.Cmd) {
+	backends := make([]core.Backend, 0, len(m.discovered))
+	for _, name := range m.discovered {
+		if b := m.byName[name]; b != nil {
+			backends = append(backends, b)
+			m.checking[name] = true
+		}
+	}
+
+	// Drop the previous run's results so nothing stale lingers; checks repopulate.
+	m.rows = nil
+	m.selected = map[string]bool{}
+	m.errs = map[string]string{}
+	m.progress = map[string]*srcState{}
+	m.applying = nil
+	m.applyCh = nil
+	m.focus = 0
+	m.tables = map[string]*table.Model{} // fresh tables: cursor/scroll start at top
+	m.syncAllPanels()
+
+	m.state = stateSelecting
+	if len(backends) == 0 {
+		return m, nil
+	}
+	return m, tea.Batch(startCheckCmd(m.ctx, backends), m.ensureTick())
 }
 
 func (m Model) keySelecting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -303,6 +348,12 @@ func (m Model) keySelecting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.anySelected() {
 			m.state = stateReviewing
 		}
+	case key.Matches(msg, m.keys.Install):
+		if r, ok := m.currentRow(); ok {
+			rr := r
+			m.installTarget = &rr
+			m.state = stateConfirmInstall
+		}
 	}
 	return m, nil
 }
@@ -335,8 +386,39 @@ func (m Model) keyReviewing(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.DryRun):
 		m.dryRun = !m.dryRun
 	case key.Matches(msg, m.keys.Apply):
+		m.applying = m.selectionByBackend()
 		m.state = stateApplying
-		return m, tea.Batch(startApplyCmd(m.ctx, m.selectionByBackend(), m.byName, m.dryRun), m.ensureTick())
+		return m, tea.Batch(startApplyCmd(m.ctx, m.applying, m.byName, m.dryRun), m.ensureTick())
+	case key.Matches(msg, m.keys.Quit):
+		m.cancel()
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+// keyConfirmInstall handles the (i) single-package confirmation modal: apply just
+// the hovered package via its backend, or cancel back to Selecting.
+func (m Model) keyConfirmInstall(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Back):
+		m.state = stateSelecting
+		m.installTarget = nil
+	case key.Matches(msg, m.keys.DryRun):
+		m.dryRun = !m.dryRun
+	case key.Matches(msg, m.keys.Apply):
+		t := m.installTarget
+		m.installTarget = nil
+		if t == nil {
+			m.state = stateSelecting
+			return m, nil
+		}
+		// Clear Pinned on the copy so backends that skip pinned items in Apply
+		// (e.g. brew) honor this explicit per-package override.
+		u := t.update
+		u.Pinned = false
+		m.applying = map[string][]core.Update{t.source: {u}}
+		m.state = stateApplying
+		return m, tea.Batch(startApplyCmd(m.ctx, m.applying, m.byName, m.dryRun), m.ensureTick())
 	case key.Matches(msg, m.keys.Quit):
 		m.cancel()
 		return m, tea.Quit
@@ -401,8 +483,9 @@ func (m *Model) onChecked(msg checkedMsg) (tea.Model, tea.Cmd) {
 func (m *Model) onCheckDone() (tea.Model, tea.Cmd) {
 	m.checkCh = nil
 	if m.autoYes && m.anySelected() {
+		m.applying = m.selectionByBackend()
 		m.state = stateApplying
-		return *m, tea.Batch(startApplyCmd(m.ctx, m.selectionByBackend(), m.byName, m.dryRun), m.ensureTick())
+		return *m, tea.Batch(startApplyCmd(m.ctx, m.applying, m.byName, m.dryRun), m.ensureTick())
 	}
 	return *m, nil
 }
