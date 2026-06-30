@@ -378,7 +378,10 @@ func (m *Model) syncTable(src string) {
 	}
 	focused := src == m.focusedSource()
 	cur := t.Cursor()
-	nameW, curW, newW, sizeW := panelColumns(rs, contentW)
+	// Size the columns from every backend's rows, not just this panel's, so the
+	// name/version/size columns line up vertically down the whole stack. The
+	// inner width is identical for every full-width panel, so one sizing fits all.
+	nameW, curW, newW, sizeW := panelColumns(m.rows, contentW)
 	rows := make([]table.Row, len(rs))
 	for i, r := range rs {
 		rows[i] = table.Row{m.renderPanelRow(r, focused && i == cur, nameW, curW, newW, sizeW)}
@@ -576,7 +579,9 @@ func (m Model) renderPanelRow(r row, isCursor bool, nameW, curW, newW, sizeW int
 	}
 	name := padRight(truncate(r.update.Name, nameW), nameW)
 	cur := padRight(truncate(displayVersion(r.update.CurrentVersion), curW), curW)
-	nv := truncate(displayVersion(r.update.NewVersion), newW)
+	// Pad nv to the column width too: an unpadded new-version shifts the size
+	// column and (pin) badge left on rows with shorter versions.
+	nv := padRight(truncate(displayVersion(r.update.NewVersion), newW), newW)
 
 	line := fmt.Sprintf("%s%s %s  %s%s%s",
 		cursor, check, name, dimStyle.Render(cur), dimStyle.Render(" → "), nv)
@@ -714,12 +719,27 @@ func (m Model) reviewModal() string {
 	}
 	body = append(body, "", m.help.ShortHelpView(m.keys.reviewingHelp()))
 
+	// withModalBg patches the joined content so the modal background survives the
+	// nested resets emitted by the foreground-only child styles (titleStyle, etc.).
+	// lipgloss only paints the outer Background at the padding edges, so without
+	// this the gaps between styled segments show terminal-default background.
+	content := withModalBg(lipgloss.JoinVertical(lipgloss.Left, body...), colModalBg)
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(colAccent)).
 		Background(lipgloss.Color(colModalBg)).
 		Padding(1, 3).
-		Render(lipgloss.JoinVertical(lipgloss.Left, body...))
+		Render(content)
+}
+
+// withModalBg rewrites every SGR reset in s so it re-establishes the given
+// 256-color background, keeping the fill continuous across child styles that
+// reset to terminal default. See reviewModal for why this is needed.
+func withModalBg(s, colorIdx string) string {
+	bg := fmt.Sprintf("\x1b[48;5;%sm", colorIdx)
+	s = strings.ReplaceAll(s, "\x1b[0m", "\x1b[0m"+bg)
+	s = strings.ReplaceAll(s, "\x1b[m", "\x1b[m"+bg)
+	return bg + s
 }
 
 // dryRunBadge returns a " DRY RUN" tag for the headers when simulating.
@@ -898,25 +918,24 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 
 	body := make([]string, 0, contentH)
 
-	// Reserve the last line for the overall progress bar (or an error message).
+	// Reserve the last line for the overall progress bar (or an error message),
+	// plus a blank spacer above it so the bar doesn't crowd the table.
 	barH := 0
 	if contentH >= 2 {
 		barH = 1
 	}
-	listH := contentH - barH
+	spacerH := 0
+	if contentH >= 3 {
+		spacerH = 1
+	}
+	listH := contentH - barH - spacerH
 
 	// The package list, scrolled so the active item stays in view.
 	// Reserve a per-row bar column, dropping it on narrow panels so the columns
-	// keep today's behaviour when there's no room. "+2" is the leading gap.
-	barW := 0
-	if contentW >= 48 {
-		barW = clampInt(contentW/5, 10, 18)
-	}
-	colW := contentW
-	if barW > 0 {
-		colW = contentW - barW - 2
-	}
-	nameW, curW, newW, sizeW := applyColumns(pkgs, colW)
+	// keep today's behaviour when there's no room. The column widths are sized
+	// once across every backend's packages so they line up down the whole stack.
+	barW := applyBarWidth(contentW)
+	nameW, curW, newW, sizeW := m.applyColWidths()
 	offset := 0
 	if total > listH {
 		offset = clampInt(activeRow(pkgs, st)-listH/2, 0, total-listH)
@@ -943,12 +962,16 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 		}
 	}
 
+	if spacerH == 1 {
+		body = append(body, padRight("", contentW))
+	}
 	if barH == 1 {
 		var totalBytes int64
 		for _, u := range pkgs {
 			totalBytes += u.SizeBytes
 		}
-		body = append(body, padRight(m.applyBottomLine(st, done, total, totalBytes, contentW), contentW))
+		frac := applyOverallFraction(pkgs, st)
+		body = append(body, padRight(m.applyBottomLine(st, done, frac, totalBytes, contentW), contentW))
 	}
 	for len(body) < contentH {
 		body = append(body, padRight("", contentW))
@@ -994,7 +1017,8 @@ func (m Model) renderApplyRow(i int, u core.Update, st *srcState, nameW, curW, n
 
 	name := padRight(truncate(u.Name, nameW), nameW)
 	cur := padRight(truncate(displayVersion(u.CurrentVersion), curW), curW)
-	nv := truncate(displayVersion(u.NewVersion), newW)
+	// Pad nv so the size column and per-row bar don't shift on shorter versions.
+	nv := padRight(truncate(displayVersion(u.NewVersion), newW), newW)
 	line := fmt.Sprintf("%s %s  %s%s%s",
 		icon, name, dimStyle.Render(cur), dimStyle.Render(" → "), nv)
 	if sizeW > 0 {
@@ -1043,7 +1067,7 @@ func applyActiveNote(u core.Update, st *srcState) string {
 // applyBottomLine is the panel's summary footer: an error when failed, a done
 // note (with elapsed time) when finished, otherwise an overall progress bar with
 // a downloaded/total · rate · ETA cluster on the right when sizes are known.
-func (m Model) applyBottomLine(st *srcState, done, total int, totalBytes int64, w int) string {
+func (m Model) applyBottomLine(st *srcState, done int, frac float64, totalBytes int64, w int) string {
 	switch {
 	case st != nil && st.failed:
 		return errStyle.Render(truncate("✗ "+st.errText, max(w, 1)))
@@ -1054,10 +1078,7 @@ func (m Model) applyBottomLine(st *srcState, done, total int, totalBytes int64, 
 		}
 		return okStyle.Render(note)
 	default:
-		frac := 0.0
-		if total > 0 {
-			frac = (float64(done) + clamp01(stFraction(st))) / float64(total)
-		}
+		frac = clamp01(frac)
 		right := rateETA(st, frac, totalBytes)
 		// In a narrow panel there's no room for both; keep the full-width bar and
 		// drop the cluster (the header still carries the elapsed timer).
@@ -1095,6 +1116,35 @@ func rateETA(st *srcState, frac float64, totalBytes int64) string {
 		}
 	}
 	return strings.Join(parts, sepTight)
+}
+
+// applyBarWidth is the per-row progress-bar column width for an apply panel of
+// the given content width; 0 on panels too narrow to spare the room. "+2" (used
+// by callers) is the leading gap before the bar.
+func applyBarWidth(contentW int) int {
+	if contentW >= 48 {
+		return clampInt(contentW/5, 10, 18)
+	}
+	return 0
+}
+
+// applyColWidths sizes the apply panels' name / current / new / size columns
+// once across every selected package in the run, so the columns line up
+// vertically down the whole stack instead of each panel choosing its own widths
+// from its own packages. Every full-width panel shares the same content (and so
+// bar) width, so one sizing fits all.
+func (m Model) applyColWidths() (nameW, curW, newW, sizeW int) {
+	contentW := m.panelContentW()
+	colW := contentW
+	if barW := applyBarWidth(contentW); barW > 0 {
+		colW = contentW - barW - 2
+	}
+	sel := m.selectionByBackend()
+	var all []core.Update
+	for _, s := range m.appliedSources() {
+		all = append(all, sel[s]...)
+	}
+	return applyColumns(all, colW)
 }
 
 // applyColumns sizes the name / current / new / size columns for an apply panel,
@@ -1210,6 +1260,8 @@ func progressBar(f float64, w int, st *srcState) string {
 // rowProgressBar draws one apply row's bar, coloured by that row's status —
 // dim/idle while pending, accent while downloading, green once done, red on
 // failure — so completed rows read as a full green wall as the run progresses.
+// The bar is wrapped in dim brackets so the per-row bars read as distinct
+// units rather than clumping into one block down the column.
 func rowProgressBar(f float64, w int, status pkgStat) string {
 	fill := colDim // pending: dim, reads as an empty/idle track
 	switch status {
@@ -1220,7 +1272,10 @@ func rowProgressBar(f float64, w int, status pkgStat) string {
 	case statFailed:
 		fill = colErr
 	}
-	return coloredBar(f, w, fill)
+	if w < 6 { // no room for brackets + a meaningful bar
+		return coloredBar(f, w, fill)
+	}
+	return dimStyle.Render("[") + coloredBar(f, w-2, fill) + dimStyle.Render("]")
 }
 
 // coloredBar renders a [████░░░░] bar of the given width and fill colour using
@@ -1253,6 +1308,24 @@ func rowFraction(status pkgStat, name string, st *srcState) float64 {
 		}
 	}
 	return 0
+}
+
+// applyOverallFraction is the panel's overall progress: the mean of the
+// per-row fractions across every package. Because each row's fraction is
+// monotonic (a done/seen row stays at 1.0 and the active row reports its
+// persisted max via pkgFrac), the overall bar only ever advances — unlike a
+// naive (done + current-item fraction)/total, which snaps backwards when the
+// active item's fraction resets on each new package (e.g. PackageKit, which
+// never emits a per-item EventItemDone).
+func applyOverallFraction(pkgs []core.Update, st *srcState) float64 {
+	if len(pkgs) == 0 {
+		return 0
+	}
+	var sum float64
+	for i, u := range pkgs {
+		sum += rowFraction(pkgRowStatus(i, u.Name, st), u.Name, st)
+	}
+	return sum / float64(len(pkgs))
 }
 
 func stFraction(st *srcState) float64 {
