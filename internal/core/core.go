@@ -48,6 +48,9 @@ const (
 	EventItemDone                  // one package finished
 	EventError                     // something went wrong
 	EventDone                      // the whole transaction finished
+	EventStatus                    // transaction-wide phase label (no item), e.g.
+	// "resolving dependencies" — distinct from EventPhase so it never disturbs
+	// per-package item/progress state. Carried in the Phase field.
 )
 
 // ProgressEvent is the single currency Apply streams back to the UI.

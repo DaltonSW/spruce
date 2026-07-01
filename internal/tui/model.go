@@ -35,6 +35,7 @@ type row struct {
 // srcState tracks live progress for one backend during Applying.
 type srcState struct {
 	phase    string
+	status   string // transaction-wide phase label (EventStatus), e.g. "resolving dependencies…"
 	item     string
 	done     int
 	fraction float64            // 0–1 progress for the current item, if reported
@@ -282,6 +283,7 @@ func (m Model) onPlansResolved(msg plansResolvedMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if m.state == stateApplying && m.applyCh == nil {
+		m.seedApplyProgress()
 		return m, tea.Batch(startApplyCmd(m.ctx, m.plans, m.byName, m.dryRun), m.ensureTick())
 	}
 	return m, nil
@@ -295,7 +297,24 @@ func (m Model) beginApply() (tea.Model, tea.Cmd) {
 	if m.planning {
 		return m, m.ensureTick()
 	}
+	m.seedApplyProgress()
 	return m, tea.Batch(startApplyCmd(m.ctx, m.plans, m.byName, m.dryRun), m.ensureTick())
+}
+
+// seedApplyProgress marks the apply start time for every backend about to run, so
+// the panel's elapsed timer counts the full wall-clock — including a backend's
+// silent prep phase (dnf5's metadata/depsolve can run many seconds before it
+// emits its first progress signal) — rather than starting only at the first
+// event. applyEvent won't reset an already-started clock, so the count is stable.
+func (m *Model) seedApplyProgress() {
+	for name, p := range m.plans {
+		if len(p.Selected) == 0 {
+			continue
+		}
+		if m.progress[name] == nil {
+			m.progress[name] = &srcState{started: time.Now(), status: "preparing…"}
+		}
+	}
 }
 
 func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -673,6 +692,10 @@ func (m *Model) applyEvent(ev core.ProgressEvent) {
 		st.failed = true
 		st.errText = ev.Text
 		st.appendLog("✗ " + ev.Text)
+	case core.EventStatus:
+		// Transaction-wide phase label; deliberately touches nothing else so it
+		// can't disturb per-package item/progress state.
+		st.status = ev.Phase
 	case core.EventPrompt:
 		st.appendLog("⏸ " + ev.Text)
 	case core.EventDone:

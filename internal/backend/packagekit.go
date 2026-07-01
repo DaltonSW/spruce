@@ -24,20 +24,25 @@ const (
 	// real upgrade. Without it PackageKit treats the transaction as installing
 	// UNTRUSTED packages and demands the org.freedesktop.packagekit.
 	// package-install-untrusted polkit authorization, which the standard auth
-	// agent won't grant — so the update fails instantly ("failed to obtain
-	// auth"). Every Fedora repo package is GPG-signed, so requiring trust is
-	// correct here; it's the same flag dnf and GNOME Software use, and it routes
-	// to the grantable system-update/package-install action instead.
+	// agent won't grant — so the update fails instantly ("Failed to obtain
+	// authentication"). Every Fedora repo package is GPG-signed, so requiring
+	// trust is correct here; it's the same flag dnf and GNOME Software use, and
+	// it routes to the local-session-granted system-update action instead.
 	//
-	// We deliberately do NOT add the SIMULATE flag for dry runs: the dnf5
+	// The wire value is a PkBitfield: the bit index is the enum's (sequential)
+	// value, NOT the enum value itself. PK_TRANSACTION_FLAG_ENUM_ONLY_TRUSTED is
+	// enum 1 (NONE=0, ONLY_TRUSTED=1, SIMULATE=2, ...), so its bit is 1<<1. Using
+	// 1<<0 sends bit 0 (= NONE), which the daemon reads as only_trusted:0 and
+	// rejects with the auth failure above — the exact symptom this once caused.
+	//
+	// We deliberately do NOT add the SIMULATE flag (1<<2) for dry runs: the dnf5
 	// PackageKit backend has been observed to ignore it and apply the transaction
 	// for real, so dry runs never call the mutating UpdatePackages method at all
 	// (see Apply).
-	pkFlagOnlyTrusted = uint64(1 << 0)
+	pkFlagOnlyTrusted = uint64(1 << 1)
 
-	// Pk filter bitfield. Unlike the transaction flag above (whose enum values
-	// are already bit positions), the filter enum is sequential (UNKNOWN=0,
-	// NONE=1, INSTALLED=2, ...) and the wire value is 1<<enum.
+	// Pk filter bitfield, encoded the same way: the filter enum is sequential
+	// (UNKNOWN=0, NONE=1, INSTALLED=2, ...) and the wire value is 1<<enum.
 	pkFilterInstalled = uint64(1 << 2) // PK_FILTER_ENUM_INSTALLED
 )
 
@@ -98,6 +103,20 @@ func runTransaction(
 		dbus.WithMatchObjectPath(tpath),
 		dbus.WithMatchInterface(pkTxIface),
 	)
+
+	// Also receive D-Bus property changes on this transaction: the Status
+	// property carries the live phase (DEP_RESOLVE, DOWNLOAD, INSTALL, ...),
+	// which is the only signal during dnf5's long silent depsolve. Best-effort —
+	// status labels are cosmetic, so a failure here must not fail the upgrade.
+	if err := conn.AddMatchSignalContext(ctx,
+		dbus.WithMatchObjectPath(tpath),
+		dbus.WithMatchInterface("org.freedesktop.DBus.Properties"),
+	); err == nil {
+		defer conn.RemoveMatchSignal(
+			dbus.WithMatchObjectPath(tpath),
+			dbus.WithMatchInterface("org.freedesktop.DBus.Properties"),
+		)
+	}
 
 	sigs := make(chan *dbus.Signal, 128)
 	conn.Signal(sigs)
@@ -349,6 +368,21 @@ func (PackageKit) Apply(ctx context.Context, plan core.Plan) (<-chan core.Progre
 						events <- core.ProgressEvent{Kind: core.EventProgress, Source: "system",
 							Item: n, Fraction: float64(pct) / 100.0}
 					}
+				case "PropertiesChanged":
+					// sa{sv}as: [iface, changed, invalidated]. The Status property
+					// is the transaction-wide phase; surface it as a status label.
+					if len(body) >= 2 {
+						if props, ok := body[1].(map[string]dbus.Variant); ok {
+							if v, has := props["Status"]; has {
+								if s, ok := toUint(v.Value()); ok {
+									if label := pkStatusLabel(s); label != "" {
+										events <- core.ProgressEvent{Kind: core.EventStatus,
+											Source: "system", Phase: label}
+									}
+								}
+							}
+						}
+					}
 				}
 			})
 		if err != nil {
@@ -358,6 +392,47 @@ func (PackageKit) Apply(ctx context.Context, plan core.Plan) (<-chan core.Progre
 	}()
 
 	return events, nil
+}
+
+// pkStatusLabel maps a PkStatusEnum (the transaction's Status property, a
+// sequential enum) to a short lowercase phase label. Returns "" for statuses
+// not worth surfacing (UNKNOWN/RUNNING/FINISHED/...), so the UI keeps its prior
+// label. These are the phases dnf5 moves through during a system update.
+func pkStatusLabel(status uint64) string {
+	switch status {
+	case 1, 30: // WAIT, WAITING_FOR_LOCK
+		return "waiting…"
+	case 31: // WAITING_FOR_AUTH
+		return "waiting for authorization…"
+	case 2: // SETUP
+		return "setting up…"
+	case 7: // REFRESH_CACHE
+		return "refreshing cache…"
+	case 27: // LOADING_CACHE
+		return "loading cache…"
+	case 13: // DEP_RESOLVE
+		return "resolving dependencies…"
+	case 8, 20, 21, 22, 23, 24, 25: // DOWNLOAD + DOWNLOAD_*
+		return "downloading…"
+	case 14: // SIG_CHECK
+		return "checking signatures…"
+	case 15: // TEST_COMMIT
+		return "testing changes…"
+	case 9: // INSTALL
+		return "installing…"
+	case 10: // UPDATE
+		return "updating…"
+	case 16: // COMMIT
+		return "applying changes…"
+	case 6: // REMOVE
+		return "removing…"
+	case 11: // CLEANUP
+		return "cleaning up…"
+	case 36: // RUN_HOOK
+		return "running hooks…"
+	default:
+		return ""
+	}
 }
 
 // parsePackageID splits a PackageKit package_id ("name;version;arch;data").

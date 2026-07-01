@@ -855,11 +855,17 @@ func (m Model) viewApplying() string {
 		return dimStyle.Render("Nothing to apply.") + "\n\n" + helpStyle.Render("q quit")
 	}
 
-	// Each apply panel is sized to the number of packages it's applying.
+	// Each apply panel is sized to the number of packages it's applying, plus
+	// room for the full (wrapped) error text when that backend has failed — the
+	// whole screen is free for a lone failed install, so don't bury the reason.
 	sel := m.applying
+	errW := max(m.width-2-panelGutter, 4)
 	content := make([]int, len(srcs))
 	for i, s := range srcs {
 		content[i] = max(len(sel[s]), 1)
+		if st := m.progress[s]; st != nil && st.failed && st.errText != "" {
+			content[i] = max(len(sel[s]), 1) + len(wrapLines("✗ "+st.errText, errW)) + 1
+		}
 	}
 	heights := panelLayout(content, m.selectAvailHeight())
 	grid := renderStack(srcs, m.width, heights, func(src string, w, h int) string {
@@ -993,6 +999,34 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 
 	body := make([]string, 0, contentH)
 
+	// Failed apply: show the package list, then the full word-wrapped error
+	// beneath it. The panel was sized (viewApplying) to fit the wrapped text, so
+	// the whole reason is legible instead of clipped to a single bottom line.
+	if st != nil && st.failed && st.errText != "" {
+		barW := applyBarWidth(contentW)
+		nameW, curW, newW, sizeW := m.applyColWidths()
+		for i := 0; i < total && len(body) < contentH; i++ {
+			body = append(body, padRight(m.renderApplyRow(i, pkgs[i], st, nameW, curW, newW, sizeW, barW, contentW), contentW))
+		}
+		if len(body) < contentH {
+			body = append(body, padRight("", contentW)) // spacer above the error
+		}
+		for _, l := range wrapLines("✗ "+st.errText, contentW) {
+			if len(body) >= contentH {
+				break
+			}
+			body = append(body, padRight(errStyle.Render(l), contentW))
+		}
+		for len(body) < contentH {
+			body = append(body, padRight("", contentW))
+		}
+		lines = append(lines, body[:contentH]...)
+		for i := range lines {
+			lines[i] = indent(lines[i])
+		}
+		return solidBoxColor(lines, colErr)
+	}
+
 	// Reserve the last line for the overall progress bar (or an error message),
 	// plus a blank spacer above it so the bar doesn't crowd the table.
 	barH := 0
@@ -1078,13 +1112,19 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 // past the border.
 func (m Model) renderApplyRow(i int, u core.Update, st *srcState, nameW, curW, newW, sizeW, barW, innerW int) string {
 	status := pkgRowStatus(i, u.Name, st)
+	// Before any package goes active, the transaction may already be working
+	// (dnf5's silent depsolve/download); show that status on the row next in line
+	// so even a one-row panel shows life instead of a bare ○ for tens of seconds.
+	prepActive := st != nil && !st.finished && !st.failed && st.status != "" &&
+		st.item == "" && i == st.done
+
 	var icon string
-	switch status {
-	case statDone:
+	switch {
+	case status == statDone:
 		icon = okStyle.Render("✓")
-	case statActive:
+	case status == statActive || prepActive:
 		icon = cursorStyle.Render(m.spinner.View())
-	case statFailed:
+	case status == statFailed:
 		icon = errStyle.Render("✗")
 	default:
 		icon = dimStyle.Render("○")
@@ -1108,12 +1148,17 @@ func (m Model) renderApplyRow(i int, u core.Update, st *srcState, nameW, curW, n
 
 	// Annotate the in-flight package with what it's doing right now, truncated to
 	// the width left in the panel so the styled note never overflows the border.
-	if status == statActive && st != nil {
-		if note := applyActiveNote(u, st); note != "" {
-			// "  · " is 4 visible cols of overhead before the (truncatable) note.
-			if avail := innerW - lipgloss.Width(line) - 4; avail > 0 {
-				line += "  " + dimStyle.Render("· "+truncate(note, avail))
-			}
+	note := ""
+	switch {
+	case status == statActive && st != nil:
+		note = applyActiveNote(u, st)
+	case prepActive:
+		note = st.status
+	}
+	if note != "" {
+		// "  · " is 4 visible cols of overhead before the (truncatable) note.
+		if avail := innerW - lipgloss.Width(line) - 4; avail > 0 {
+			line += "  " + dimStyle.Render("· "+truncate(note, avail))
 		}
 	}
 	return line
@@ -1153,6 +1198,16 @@ func (m Model) applyBottomLine(st *srcState, done int, frac float64, totalBytes 
 		}
 		return okStyle.Render(note)
 	default:
+		// Silent prep phase: the backend has started but emitted no progress yet
+		// (dnf5 spends seconds on metadata/depsolve before its first signal). Show
+		// that it's working rather than a frozen 0% bar — the header timer is live.
+		if st != nil && !st.finished && st.item == "" && done == 0 && frac == 0 {
+			label := st.status
+			if label == "" {
+				label = "preparing…"
+			}
+			return dimStyle.Render(m.spinner.View() + " " + label)
+		}
 		frac = clamp01(frac)
 		right := rateETA(st, frac, totalBytes)
 		// In a narrow panel there's no room for both; keep the full-width bar and
@@ -1482,4 +1537,15 @@ func truncate(s string, n int) string {
 		return s[:n]
 	}
 	return s[:n-1] + "…"
+}
+
+// wrapLines word-wraps s to width w and returns the resulting lines. Used so an
+// apply panel can show a backend's full error instead of truncating it to one
+// line; sizing and rendering share this so their line counts agree.
+func wrapLines(s string, w int) []string {
+	if w < 1 {
+		w = 1
+	}
+	wrapped := lipgloss.NewStyle().Width(w).Render(s)
+	return strings.Split(wrapped, "\n")
 }
