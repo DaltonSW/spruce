@@ -13,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/dustin/go-humanize"
 	colorful "github.com/lucasb-eyer/go-colorful"
+	"github.com/superstarryeyes/bit/ansifonts"
 
 	"go.dalton.dog/spruce/internal/core"
 )
@@ -78,6 +79,67 @@ var (
 	helpKeyStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(colAccent))
 )
 
+// bannerFont is the ansifonts bitmap font used for the "spruce" wordmark banner.
+// It's a single constant so the look is trivial to swap.
+const bannerFont = "8bitfortress"
+
+// bannerLines is the "spruce" wordmark, rendered once at startup with a static
+// cyan→pink gradient (the same accents in gradPalette) baked in as ANSI codes.
+// nil when the font can't load, in which case the header falls back to plain text.
+// bannerWidth is the widest line, used to decide when the banner fits the terminal.
+var (
+	bannerLines []string
+	bannerWidth int
+)
+
+func init() {
+	font, err := ansifonts.LoadFont(bannerFont)
+	if err != nil {
+		return // leave bannerLines nil → plain-title fallback
+	}
+	opts := ansifonts.DefaultRenderOptions()
+	opts.TextColor = "#5fd7ff"     // cyan (gradient start)
+	opts.GradientColor = "#ff5fd7" // pink (gradient end)
+	opts.UseGradient = true
+	opts.GradientDirection = ansifonts.LeftRight
+	opts.Alignment = ansifonts.LeftAlign
+	bannerLines = ansifonts.RenderTextWithOptions("spruce", font, opts)
+	for _, ln := range bannerLines {
+		if w := lipgloss.Width(ln); w > bannerWidth {
+			bannerWidth = w
+		}
+	}
+}
+
+// headerContent is the gradient banner when it fits the terminal width, otherwise
+// the plain bold title (also used before the first WindowSizeMsg, when width==0).
+func headerContent(width int) string {
+	if len(bannerLines) == 0 || bannerWidth > width {
+		return titleStyle.Render("spruce")
+	}
+	return strings.Join(bannerLines, "\n")
+}
+
+// headerView positions the header in the empty space above the body: one blank
+// line of top padding, with the content horizontally centered across the width.
+func headerView(width int) string {
+	c := headerContent(width)
+	if width > 0 {
+		c = lipgloss.PlaceHorizontal(width, lipgloss.Center, c)
+	}
+	return "\n" + c
+}
+
+// headerHeight is the number of content lines headerView(width) produces (the
+// banner or the plain title), not counting the top-padding line, so the layout
+// below can reserve the right amount of vertical space.
+func headerHeight(width int) int {
+	if len(bannerLines) == 0 || bannerWidth > width {
+		return 1
+	}
+	return len(bannerLines)
+}
+
 func (m Model) View() tea.View {
 	var body string
 	switch m.state {
@@ -93,7 +155,7 @@ func (m Model) View() tea.View {
 		body = m.viewApplying()
 	}
 
-	v := tea.NewView(titleStyle.Render("spruce") + "\n\n" + body)
+	v := tea.NewView(headerView(m.width) + "\n\n" + body)
 	v.AltScreen = true
 	return v
 }
@@ -184,10 +246,11 @@ func (m Model) sourceRows(src string) []row {
 	return out
 }
 
-// selectAvailHeight is the height available to the panel grid, after the title
-// block above (2) and the count/help lines below (2).
+// selectAvailHeight is the height available to the panel grid, after the header
+// block above (top-padding line + content lines + one blank separator line) and
+// the count/help lines below (2). With the plain 1-line title this is m.height-5.
 func (m Model) selectAvailHeight() int {
-	return max(m.height-4, 6)
+	return max(m.height-headerHeight(m.width)-4, 6)
 }
 
 // minStackPanelH is the floor a panel can shrink to: a border (2) plus a header

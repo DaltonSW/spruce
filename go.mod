@@ -12,6 +12,7 @@ require (
 	github.com/godbus/dbus/v5 v5.2.2
 	github.com/lucasb-eyer/go-colorful v1.4.0
 	github.com/spf13/cobra v1.10.2
+	github.com/superstarryeyes/bit v0.3.0
 )
 
 require (
@@ -37,5 +38,5 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/text v0.24.0 // indirect
+	golang.org/x/text v0.29.0 // indirect
 )

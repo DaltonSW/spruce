@@ -16,4 +16,4 @@ Enter
 Sleep 3s
 
 Enter
-Sleep 30s
+Sleep 20s

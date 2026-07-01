@@ -65,7 +65,7 @@ func TestSelectingFitsTerminal(t *testing.T) {
 	for _, cur := range []int{0, 100, 219} {
 		m.tableFor("system").SetCursor(cur)
 		m.syncTable("system")
-		full := "spruce\n\n" + m.viewSelecting() // mirrors View()'s wrapper
+		full := headerView(m.width) + "\n\n" + m.viewSelecting() // mirrors View()'s wrapper
 
 		lines := strings.Split(full, "\n")
 		if len(lines) > m.height {
@@ -145,7 +145,7 @@ func TestStackedLayout(t *testing.T) {
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 50, Height: 40})
 	m = updated.(Model)
 
-	full := "spruce\n\n" + m.viewSelecting()
+	full := headerView(m.width) + "\n\n" + m.viewSelecting()
 	lines := strings.Split(full, "\n")
 	if len(lines) > m.height {
 		t.Errorf("%d lines exceeds height %d", len(lines), m.height)
@@ -331,7 +331,7 @@ func TestReviewModal(t *testing.T) {
 		t.Errorf("modal should summarize the total across managers:\n%s", modal)
 	}
 
-	full := "spruce\n\n" + m.viewReviewing()
+	full := headerView(m.width) + "\n\n" + m.viewReviewing()
 	lines := strings.Split(full, "\n")
 	if len(lines) > m.height {
 		t.Errorf("composited review is %d lines, exceeds height %d", len(lines), m.height)
@@ -399,7 +399,7 @@ func TestApplyPanelListsPackages(t *testing.T) {
 	}
 
 	// Must still fit the terminal.
-	full := "spruce\n\n" + body
+	full := headerView(m.width) + "\n\n" + body
 	for i, ln := range strings.Split(full, "\n") {
 		if w := lipgloss.Width(ln); w > m.width {
 			t.Errorf("apply line %d width %d exceeds %d: %q", i, w, m.width, ln)
@@ -503,7 +503,7 @@ func TestSizeAndTimingDisplay(t *testing.T) {
 	// narrow two-panel size where the footer cluster and active note must shrink.
 	for _, w := range []int{160, 74} {
 		m.width = w
-		for i, ln := range strings.Split("spruce\n\n"+m.viewApplying(), "\n") {
+		for i, ln := range strings.Split(headerView(m.width)+"\n\n"+m.viewApplying(), "\n") {
 			if lw := lipgloss.Width(ln); lw > m.width {
 				t.Errorf("w=%d apply line %d width %d exceeds %d: %q", w, i, lw, m.width, ln)
 			}

@@ -5,6 +5,8 @@ workflows that already exist on
 your system. It does **not** reimplement any package manager — each backend
 drives the real tool and streams structured progress back to the UI.
 
+![demo.gif](./assets/demo.gif)
+
 Built with Go + the Charm **v2** stack (`charm.land/bubbletea/v2`, `charm.land/lipgloss/v2`).
 
 ## Backends
@@ -13,12 +15,22 @@ Each is discovered at runtime; only the ones present on the machine appear.
 
 | Source | Integration |
 |---|---|
-| **system** (dnf/apt/zypper) | PackageKit over D-Bus — structured signals, polkit auth, no sudo parsing |
+| **system** | PackageKit* over D-Bus — structured signals, polkit auth, no sudo parsing |
 | **brew** | `brew outdated --json=v2` for the list; `brew upgrade` under a PTY for progress |
 | **flatpak** | per-remote `flatpak remote-ls --updates`; `flatpak update -y` to apply |
 | **snap** | snapd REST API over `/run/snapd.socket`; polls the change for progress |
 
 AppImage is intentionally out of scope (no central registry to query).
+
+*PackageKit is an abstraction over system-level package managers, so (theoretically) this will work with apt, dnf, pacman, zypper, or anything else listed as a supported back-end [here](https://en.wikipedia.org/wiki/PackageKit)
+
+### Next Up
+
+- Go
+- pipx
+- gem
+- npm -g
+- ...?
 
 ## Architecture
 
