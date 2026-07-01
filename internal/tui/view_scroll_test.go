@@ -367,6 +367,40 @@ func TestDryRunToggle(t *testing.T) {
 	}
 }
 
+// Space toggles the focused package's selection. In Bubble Tea v2 a space
+// keypress stringifies to "space" (not " "), so the binding must register
+// "space"; this guards against the binding regressing to a literal space.
+func TestSpaceToggle(t *testing.T) {
+	m := gridModel(map[string]int{"system": 3})
+	r, ok := m.currentRow()
+	if !ok {
+		t.Fatal("expected a focused row")
+	}
+	id := r.update.ID()
+	if !m.selected[id] {
+		t.Fatal("row should start selected in gridModel")
+	}
+
+	// A real space keypress from the runtime: Code KeySpace, Text " ",
+	// whose String() reports "space".
+	space := tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
+	if got := space.String(); got != "space" {
+		t.Fatalf("space keypress stringifies to %q, want %q", got, "space")
+	}
+
+	tm, _ := m.keySelecting(space)
+	m = tm.(Model)
+	if m.selected[id] {
+		t.Fatal("space should deselect the focused row")
+	}
+
+	tm, _ = m.keySelecting(space)
+	m = tm.(Model)
+	if !m.selected[id] {
+		t.Fatal("space should re-select the focused row")
+	}
+}
+
 // The Applying view lists each selected package with a live status icon, scrolls
 // to keep the active item in view, and still fits the terminal.
 func TestApplyPanelListsPackages(t *testing.T) {

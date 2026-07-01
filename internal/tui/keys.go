@@ -50,7 +50,7 @@ func defaultKeys() keyMap {
 		Right:    key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("←/→/tab", "panel")),
 		Tab:      key.NewBinding(key.WithKeys("tab")),
 		ShiftTab: key.NewBinding(key.WithKeys("shift+tab")),
-		Toggle:   key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "toggle")),
+		Toggle:   key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "toggle")),
 		All:      key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "all")),
 		None:     key.NewBinding(key.WithKeys("N"), key.WithHelp("N", "none")),
 		DryRun:   key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "dry-run")),
