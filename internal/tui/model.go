@@ -6,7 +6,6 @@ import (
 	"context"
 	"time"
 
-	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/table"
@@ -93,7 +92,6 @@ type Model struct {
 	width, height int
 
 	keys    keyMap
-	help    help.Model
 	spinner spinner.Model // braille activity spinner (bubbles)
 
 	// Discovery results, keyed for Apply routing.
@@ -158,15 +156,6 @@ type Options struct {
 // New builds the initial model. ctx is cancelled when the user quits, which
 // aborts any in-flight backend work.
 func New(ctx context.Context, cancel context.CancelFunc, opts Options) Model {
-	h := help.New()
-	h.ShortSeparator = " · " // match the footer joiner the TUI has always used
-	// Give the footer visual hierarchy: bold accent keycaps so the actionable
-	// keys pop, dim labels beside them, and the faintest grey for the · joiners —
-	// so the footer reads clearly instead of blending into the status line above.
-	h.Styles.ShortKey = helpKeyStyle
-	h.Styles.ShortDesc = dimStyle
-	h.Styles.ShortSeparator = helpStyle
-
 	sp := spinner.New(spinner.WithSpinner(spinner.Spinner{
 		Frames: []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
 		FPS:    time.Second / 10,
@@ -177,7 +166,6 @@ func New(ctx context.Context, cancel context.CancelFunc, opts Options) Model {
 		cancel:    cancel,
 		state:     stateDiscovering,
 		keys:      defaultKeys(),
-		help:      h,
 		spinner:   sp,
 		byName:    map[string]core.Backend{},
 		errs:      map[string]string{},
@@ -210,7 +198,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.help.SetWidth(msg.Width)
 		m.syncAllPanels()
 		return m, nil
 
@@ -332,7 +319,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.keyConfirmInstall(msg)
 	case stateDone:
 		if key.Matches(msg, m.keys.More) {
-			return m.restartChecks()
+			return m.returnToUpdates()
 		}
 		if key.Matches(msg, m.keys.QuitDone) {
 			return m, tea.Quit
@@ -374,11 +361,66 @@ func (m Model) restartChecks() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(startCheckCmd(m.ctx, backends), m.ensureTick())
 }
 
+// returnToUpdates is the fast return from the Done screen: it reuses the cached
+// rows (still in the model — apply never clears them) instead of re-running Check
+// on every backend, which on a real system stalls for seconds. It prunes only the
+// packages a backend applied cleanly; a backend that failed keeps its items so the
+// user can retry. Genuinely-fresh data is one Rescan (ctrl+r) away.
+func (m Model) returnToUpdates() (tea.Model, tea.Cmd) {
+	// Collect the IDs successfully applied, from backends that finished without
+	// failing. Failed/unfinished backends are skipped so their rows survive.
+	remove := map[string]bool{}
+	for name, ups := range m.applying {
+		st := m.progress[name]
+		if st == nil || !st.finished || st.failed {
+			continue
+		}
+		for _, u := range ups {
+			remove[u.ID()] = true
+		}
+	}
+
+	if len(remove) > 0 {
+		kept := m.rows[:0:0]
+		for _, r := range m.rows {
+			id := r.update.ID()
+			if remove[id] {
+				delete(m.selected, id)
+				delete(m.planCache, id)
+				continue
+			}
+			kept = append(kept, r)
+		}
+		m.rows = kept
+	}
+
+	// Reset only the per-apply-run state; keep discovery (byName/discovered/errs)
+	// and the surviving selection intact.
+	m.progress = map[string]*srcState{}
+	m.applying = nil
+	m.plans = nil
+	m.planning = false
+	m.applyCh = nil
+	m.installTarget = nil
+
+	// Fresh tables so cursors can't dangle past the now-shorter row slices.
+	m.tables = map[string]*table.Model{}
+	m.focus = 0
+	m.syncAllPanels()
+
+	m.state = stateSelecting
+	return m, nil
+}
+
 func (m Model) keySelecting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		m.cancel()
 		return m, tea.Quit
+	case key.Matches(msg, m.keys.Rescan):
+		if len(m.checking) == 0 {
+			return m.restartChecks()
+		}
 	case key.Matches(msg, m.keys.Up):
 		m.moveInPanel(func(t *table.Model) { t.MoveUp(1) })
 	case key.Matches(msg, m.keys.Down):

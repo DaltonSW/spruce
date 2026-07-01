@@ -29,6 +29,7 @@ type keyMap struct {
 	Cancel   key.Binding
 	QuitDone key.Binding
 	More     key.Binding
+	Rescan   key.Binding
 }
 
 // defaultKeys mirrors the bindings (and footer wording) the TUI used when these
@@ -38,10 +39,11 @@ func defaultKeys() keyMap {
 		// Up carries the "move" label for the footer; Down is match-only.
 		Up:   key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/↓", "move")),
 		Down: key.NewBinding(key.WithKeys("down", "j")),
-		// Page/Home/End move within the focused panel; match-only (no footer help).
-		PageUp:   key.NewBinding(key.WithKeys("pgup", "ctrl+u")),
+		// Page/Home/End move within the focused panel. PageUp/Home carry the paired
+		// footer label (like Up/Right above); their partners are match-only.
+		PageUp:   key.NewBinding(key.WithKeys("pgup", "ctrl+u"), key.WithHelp("pgup/pgdn", "page")),
 		PageDown: key.NewBinding(key.WithKeys("pgdown", "ctrl+d")),
-		Home:     key.NewBinding(key.WithKeys("home", "g")),
+		Home:     key.NewBinding(key.WithKeys("home", "g"), key.WithHelp("g/G", "top/bottom")),
 		End:      key.NewBinding(key.WithKeys("end", "G")),
 		Left:     key.NewBinding(key.WithKeys("left", "h")),
 		// Right carries the "panel" label for the footer; Left/Tab/ShiftTab match-only.
@@ -59,25 +61,31 @@ func defaultKeys() keyMap {
 		Quit:     key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		Cancel:   key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "cancel")),
 		QuitDone: key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q", "quit")),
-		More:     key.NewBinding(key.WithKeys("enter", "r"), key.WithHelp("enter", "more updates")),
+		More:     key.NewBinding(key.WithKeys("enter", "r"), key.WithHelp("enter", "back to updates")),
+		Rescan:   key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "rescan")),
 	}
 }
 
 // Footer help, one slice per state — only the bindings that should appear, in
 // display order. help.Model renders each as "<key> <desc>" joined by " · ".
 
-// selectingHelp omits None (the N key still works) to keep the footer within a
-// 100-col terminal once Install is advertised.
-func (k keyMap) selectingHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Right, k.Toggle, k.All, k.DryRun, k.Install, k.Review, k.Quit}
+// selectingHelp is rendered across three grouped footer rows so every binding
+// stays visible without overflowing an ~100-col terminal: movement, then
+// selection, then actions. The view renders each row with its own ShortHelpView.
+func (k keyMap) selectingHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{k.Up, k.Right, k.PageUp, k.Home},
+		{k.Toggle, k.All, k.None},
+		{k.DryRun, k.Install, k.Review, k.Rescan, k.Quit},
+	}
 }
 
 func (k keyMap) reviewingHelp() []key.Binding {
-	return []key.Binding{k.Apply, k.DryRun, k.Back}
+	return []key.Binding{k.Apply, k.DryRun, k.Back, k.Quit}
 }
 
 func (k keyMap) confirmInstallHelp() []key.Binding {
-	return []key.Binding{k.Apply, k.DryRun, k.Back}
+	return []key.Binding{k.Apply, k.DryRun, k.Back, k.Quit}
 }
 
 func (k keyMap) applyingHelp() []key.Binding {

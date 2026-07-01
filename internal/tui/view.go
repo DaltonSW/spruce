@@ -79,6 +79,60 @@ var (
 	helpKeyStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(colAccent))
 )
 
+// helpKeycap renders one binding as a dim-bracketed accent keycap plus its dim
+// label — "[q] quit" — the brackets receding so the key letter pops.
+func helpKeycap(b key.Binding) string {
+	h := b.Help()
+	if h.Key == "" && h.Desc == "" {
+		return ""
+	}
+	cap := helpStyle.Render("[") + helpKeyStyle.Render(h.Key) + helpStyle.Render("]")
+	if h.Desc == "" {
+		return cap
+	}
+	return cap + " " + dimStyle.Render(h.Desc)
+}
+
+// helpRow joins bindings into one footer line with the shared " · " separator,
+// skipping disabled/empty bindings. Replaces help.ShortHelpView so the keycaps
+// can carry brackets the bubbles component can't style separately; like it, a row
+// wider than width is truncated to the items that fit, with a trailing ellipsis.
+func helpRow(width int, bindings []key.Binding) string {
+	sep := helpStyle.Render(sepTight)
+	sepW := lipgloss.Width(sep)
+	tail := " " + helpStyle.Render("…")
+	tailW := lipgloss.Width(tail)
+
+	var b strings.Builder
+	total := 0
+	for _, bind := range bindings {
+		if !bind.Enabled() {
+			continue
+		}
+		s := helpKeycap(bind)
+		if s == "" {
+			continue
+		}
+		w := lipgloss.Width(s)
+		if total > 0 {
+			s = sep + s
+			w += sepW
+		}
+		// Mirror help.ShortHelpView: once an item overflows the width, stop and
+		// mark the truncation — but only if the ellipsis itself fits; otherwise
+		// there's no room to signal it, so add the item and let it be the last.
+		if width > 0 && total+w > width {
+			if total+tailW < width {
+				b.WriteString(tail)
+				break
+			}
+		}
+		total += w
+		b.WriteString(s)
+	}
+	return b.String()
+}
+
 // bannerFont is the ansifonts bitmap font used for the "spruce" wordmark banner.
 // It's a single constant so the look is trivial to swap.
 const bannerFont = "8bitfortress"
@@ -167,7 +221,7 @@ func (m Model) viewDiscovering() string {
 func (m Model) viewSelecting() string {
 	if len(m.panelSources()) == 0 {
 		return dimStyle.Render("No supported package managers found.") + "\n\n" +
-			m.help.ShortHelpView([]key.Binding{m.keys.Quit})
+			helpRow(m.width, []key.Binding{m.keys.Quit})
 	}
 
 	ps := m.panels()
@@ -191,7 +245,12 @@ func (m Model) viewSelecting() string {
 	}
 	status += m.dryRunBadge()
 	b.WriteString(status + "\n")
-	b.WriteString(m.help.ShortHelpView(m.keys.selectingHelp()))
+	for i, hr := range m.keys.selectingHelp() {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(helpRow(m.width, hr))
+	}
 	return b.String()
 }
 
@@ -248,9 +307,11 @@ func (m Model) sourceRows(src string) []row {
 
 // selectAvailHeight is the height available to the panel grid, after the header
 // block above (top-padding line + content lines + one blank separator line) and
-// the count/help lines below (2). With the plain 1-line title this is m.height-5.
+// the count/help lines below: one status line plus the three-row selecting footer
+// (4). With the plain 1-line title this is m.height-7. The apply screen's footer
+// is shorter, so it just leaves a couple extra blank lines at the bottom.
 func (m Model) selectAvailHeight() int {
-	return max(m.height-headerHeight(m.width)-4, 6)
+	return max(m.height-headerHeight(m.width)-6, 6)
 }
 
 // minStackPanelH is the floor a panel can shrink to: a border (2) plus a header
@@ -777,7 +838,7 @@ func (m Model) installModal() string {
 		body = append(body, dimStyle.Render(ver))
 	}
 	body = append(body, m.planLines()...)
-	body = append(body, "", m.help.ShortHelpView(m.keys.confirmInstallHelp()))
+	body = append(body, "", helpRow(m.width, m.keys.confirmInstallHelp()))
 
 	content := withModalBg(lipgloss.JoinVertical(lipgloss.Left, body...), colModalBg)
 	return lipgloss.NewStyle().
@@ -855,7 +916,7 @@ func (m Model) reviewModal() string {
 		body = append(body, "", summary)
 	}
 	body = append(body, m.planLines()...)
-	body = append(body, "", m.help.ShortHelpView(m.keys.reviewingHelp()))
+	body = append(body, "", helpRow(m.width, m.keys.reviewingHelp()))
 
 	// withModalBg patches the joined content so the modal background survives the
 	// nested resets emitted by the foreground-only child styles (titleStyle, etc.).
@@ -915,7 +976,7 @@ func (m Model) orderedSources() []string {
 func (m Model) viewApplying() string {
 	srcs := m.appliedSources()
 	if len(srcs) == 0 {
-		return dimStyle.Render("Nothing to apply.") + "\n\n" + helpStyle.Render("q quit")
+		return dimStyle.Render("Nothing to apply.") + "\n\n" + helpRow(m.width, []key.Binding{m.keys.QuitDone})
 	}
 
 	// Each apply panel is sized to the number of packages it's applying, plus
@@ -953,9 +1014,9 @@ func (m Model) viewApplying() string {
 	b.WriteString(status + "\n")
 
 	if m.state == stateDone {
-		b.WriteString(m.help.ShortHelpView(m.keys.doneHelp()))
+		b.WriteString(helpRow(m.width, m.keys.doneHelp()))
 	} else {
-		b.WriteString(m.help.ShortHelpView(m.keys.applyingHelp()))
+		b.WriteString(helpRow(m.width, m.keys.applyingHelp()))
 	}
 	return b.String()
 }
