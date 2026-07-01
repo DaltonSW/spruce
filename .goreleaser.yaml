@@ -1,0 +1,40 @@
+version: 2
+
+project_name: spruce
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: spruce
+    main: .
+    binary: spruce
+    env:
+      - CGO_ENABLED=0
+    goos:
+      # brew is macOS+Linux; snap/flatpak/PackageKit are Linux-only. Those two
+      # OSes cover every backend.
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X go.dalton.dog/spruce/cmd.Version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"

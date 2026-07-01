@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Check @GO_STYLE.md for Go style and project structure
+
 ## What this is
 
 `spruce` is a TUI front-end over the package-upgrade workflows already present on
@@ -54,8 +56,8 @@ inside a backend implementation.
   `panelLayout` (`view.go`) sizes each panel to its content; when the panels'
   natural heights overflow the screen the tallest (the system list) shrinks and
   scrolls first, leaving the small backends whole.
-- `internal/cli` — fang/cobra command tree; root launches the TUI. `version` is
-  stamped via `-ldflags "-X go.dalton.dog/spruce/internal/cli.version=..."`.
+- `cmd` — fang/cobra command tree; root launches the TUI. `Version` is
+  stamped via `-ldflags "-X go.dalton.dog/spruce/cmd.Version=..."`.
 
 ### The flow (and the one safety gate)
 

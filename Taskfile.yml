@@ -1,0 +1,37 @@
+version: "3"
+
+vars:
+  # Stamp the version into the binary via the cmd package (see .goreleaser.yaml
+  # for the release build).
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+  LDFLAGS: -s -w -X go.dalton.dog/spruce/cmd.Version={{.VERSION}}
+
+tasks:
+  run:
+    desc: Launch the TUI (show updates, confirm to apply)
+    cmd: go run .
+
+  debug:
+    desc: Simulate the upgrade without changing anything (read-only)
+    cmd: go run . --dry-run
+
+  demos:
+    desc: Run against fake backends to preview the UI (no system access)
+    cmd: go run . --demo
+
+  build:
+    desc: Build the versioned binary
+    cmd: go build -ldflags "{{.LDFLAGS}}" -o spruce .
+
+  vet:
+    desc: Vet all packages
+    cmd: go vet ./...
+
+  fmt:
+    desc: List unformatted files
+    cmd: gofmt -l cmd/ internal/ main.go
+
+  test:
+    desc: Run all tests
+    cmd: go test ./...
