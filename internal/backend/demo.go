@@ -14,10 +14,10 @@ import (
 // list, small lists, an up-to-date backend, and an apply that fails partway.
 func DemoBackends() []core.Backend {
 	return []core.Backend{
-		demoBackend{name: "system", count: 42, checkDelay: 1300 * time.Millisecond},
-		demoBackend{name: "brew", count: 6, checkDelay: 400 * time.Millisecond},
-		demoBackend{name: "flatpak", count: 3, checkDelay: 650 * time.Millisecond, failApply: true},
-		demoBackend{name: "snap", count: 0, checkDelay: 300 * time.Millisecond},
+		demoBackend{name: "system", count: 42, checkDelay: 3800 * time.Millisecond},
+		demoBackend{name: "brew", count: 6, checkDelay: 1200 * time.Millisecond},
+		demoBackend{name: "flatpak", count: 3, checkDelay: 2300 * time.Millisecond, failApply: true},
+		demoBackend{name: "snap", count: 0, checkDelay: 800 * time.Millisecond},
 	}
 }
 
