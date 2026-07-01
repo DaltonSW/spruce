@@ -3,19 +3,18 @@
 // brew, flatpak, snap). It does not reimplement any of them — each backend
 // drives the real tool and streams progress back to the UI.
 //
-// Command handling (help, version, completions, the check subcommand) is wired
-// in internal/cli; main just hands off to it.
+// Command handling (help, version, completions) is wired in cmd; main just
+// hands off to it.
 package main
 
 import (
-	"context"
 	"os"
 
-	"go.dalton.dog/spruce/internal/cli"
+	"go.dalton.dog/spruce/cmd"
 )
 
 func main() {
-	if err := cli.Execute(context.Background()); err != nil {
+	if err := cmd.Execute(); err != nil {
 		os.Exit(1)
 	}
 }

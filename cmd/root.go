@@ -1,7 +1,6 @@
-// Package cli wires spruce's command tree. The root command launches the TUI;
-// the check subcommand is a read-only verification path over every backend.
+// Package cmd wires spruce's command tree. The root command launches the TUI;
 // fang supplies the styled help/error/version chrome around cobra.
-package cli
+package cmd
 
 import (
 	"context"
@@ -13,15 +12,19 @@ import (
 	"go.dalton.dog/spruce/internal/tui"
 )
 
-// version is stamped into the styled `--version` output. Override at build time
-// with -ldflags "-X go.dalton.dog/spruce/internal/cli.version=...".
-var version = "dev"
+// Version is stamped into the styled `--version` output. Override at build time
+// with -ldflags "-X go.dalton.dog/spruce/cmd.Version=...".
+var Version = "dev"
 
-// Execute builds the command tree and runs it through fang.
-func Execute(ctx context.Context) error {
-	return fang.Execute(ctx, newRootCmd(), fang.WithVersion(version))
+// Execute builds the command tree and runs it through fang. Returns any error
+// bubbled up from the program so main can set the exit code.
+func Execute() error {
+	return fang.Execute(context.Background(), newRootCmd(),
+		fang.WithoutCompletions(), fang.WithVersion(Version))
 }
 
+// newRootCmd assembles the root command, wires its flags, and hands control to
+// the TUI on run.
 func newRootCmd() *cobra.Command {
 	var opts tui.Options
 	root := &cobra.Command{

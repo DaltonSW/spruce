@@ -18,67 +18,6 @@ import (
 	"go.dalton.dog/spruce/internal/core"
 )
 
-// dimBorder is the resting border colour for an unfocused panel (xterm 240).
-// It anchors the loading gradient so the bright accents sweep over a dim base.
-const dimBorder = "#585858"
-
-// gradPalette is the cyclic colour loop the loading border sweeps through. The
-// dim unselected-border colour dominates so the bright blue/purple/pink accents
-// form a small, compact highlight — a "comet" — that sweeps over a dim base,
-// making the motion read clearly instead of blending into a uniform glow. The
-// run of dim stops keeps the bright arc to a small fraction of the perimeter.
-// mustHex panics only on a bad literal.
-var gradPalette = []colorful.Color{
-	mustHex(dimBorder),
-	mustHex(dimBorder),
-	mustHex(dimBorder),
-	mustHex(dimBorder),
-	mustHex(dimBorder),
-	mustHex(dimBorder),
-	mustHex(dimBorder),
-	mustHex("#5fd7ff"), // cyan-blue
-	mustHex("#af87ff"), // purple
-	mustHex("#ff5fd7"), // pink
-	mustHex(dimBorder),
-}
-
-func mustHex(s string) colorful.Color {
-	c, err := colorful.Hex(s)
-	if err != nil {
-		panic(err)
-	}
-	return c
-}
-
-// palette is every colour the UI uses, in one place. These are xterm-256 codes
-// (kept over truecolor hex so the UI still respects the user's terminal theme).
-// The one deliberate exception is the animated "checking" border, which lives in
-// gradPalette as hex because colorful.Hex requires it.
-const (
-	colAccent = "212" // pink — the single primary accent: titles, panel headers,
-	//                     the ▶ cursor, focused borders, and active progress.
-	colDim     = "244" // grey — secondary text and the empty progress track.
-	colHelp    = "240" // dark grey — the help footer and the done-state border.
-	colOk      = "78"  // green — selected, done, finished.
-	colErr     = "203" // red — errors and failed state.
-	colPin     = "214" // orange — the (pin) badge and the DRY RUN tag.
-	colModalBg = "236" // dark grey — the review modal's background.
-)
-
-var (
-	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(colAccent))
-	groupStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(colAccent))
-	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(colDim))
-	pinStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(colPin))
-	okStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color(colOk))
-	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(colErr))
-	cursorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colAccent)).Bold(true)
-	helpStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(colHelp))
-	// helpKeyStyle styles the footer keycaps: bold accent so the actionable keys
-	// pop, while the action labels (dimStyle) and separators (helpStyle) recede.
-	helpKeyStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(colAccent))
-)
-
 // helpKeycap renders one binding as a dim-bracketed accent keycap plus its dim
 // label — "[q] quit" — the brackets receding so the key letter pops.
 func helpKeycap(b key.Binding) string {
@@ -840,11 +779,10 @@ func (m Model) installModal() string {
 	body = append(body, m.planLines()...)
 	body = append(body, "", helpRow(m.width, m.keys.confirmInstallHelp()))
 
-	content := withModalBg(lipgloss.JoinVertical(lipgloss.Left, body...), colModalBg)
+	content := lipgloss.JoinVertical(lipgloss.Left, body...)
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(colAccent)).
-		Background(lipgloss.Color(colModalBg)).
 		Padding(1, 3).
 		Render(content)
 }
@@ -918,27 +856,12 @@ func (m Model) reviewModal() string {
 	body = append(body, m.planLines()...)
 	body = append(body, "", helpRow(m.width, m.keys.reviewingHelp()))
 
-	// withModalBg patches the joined content so the modal background survives the
-	// nested resets emitted by the foreground-only child styles (titleStyle, etc.).
-	// lipgloss only paints the outer Background at the padding edges, so without
-	// this the gaps between styled segments show terminal-default background.
-	content := withModalBg(lipgloss.JoinVertical(lipgloss.Left, body...), colModalBg)
+	content := lipgloss.JoinVertical(lipgloss.Left, body...)
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(colAccent)).
-		Background(lipgloss.Color(colModalBg)).
 		Padding(1, 3).
 		Render(content)
-}
-
-// withModalBg rewrites every SGR reset in s so it re-establishes the given
-// 256-color background, keeping the fill continuous across child styles that
-// reset to terminal default. See reviewModal for why this is needed.
-func withModalBg(s, colorIdx string) string {
-	bg := fmt.Sprintf("\x1b[48;5;%sm", colorIdx)
-	s = strings.ReplaceAll(s, "\x1b[0m", "\x1b[0m"+bg)
-	s = strings.ReplaceAll(s, "\x1b[m", "\x1b[m"+bg)
-	return bg + s
 }
 
 // dryRunBadge returns a " DRY RUN" tag for the headers when simulating.
