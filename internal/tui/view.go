@@ -129,9 +129,59 @@ func headerContent(width int) string {
 	return strings.Join(bannerLines, "\n")
 }
 
+// gradientText renders s with a left-to-right RGB linear gradient from
+// gradientPrimary to gradientSecondary — the same two stops the banner uses —
+// applied per rune across the string's visible width. Short strings still get a
+// smooth sweep because the factor is computed over the rune count.
+func gradientText(s string) string {
+	if s == "" {
+		return s
+	}
+	start, _ := colorful.Hex(gradientPrimary)
+	end, _ := colorful.Hex(gradientSecondary)
+	sr, sg, sb := start.RGB255()
+	er, eg, eb := end.RGB255()
+	runes := []rune(s)
+	n := len(runes)
+	var b strings.Builder
+	for i, r := range runes {
+		factor := 0.0
+		if n > 1 {
+			factor = float64(i) / float64(n-1)
+		}
+		cr := int(float64(sr) + factor*float64(int(er)-int(sr)))
+		cg := int(float64(sg) + factor*float64(int(eg)-int(sg)))
+		cb := int(float64(sb) + factor*float64(int(eb)-int(sb)))
+		b.WriteString(lipgloss.NewStyle().
+			Foreground(lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", cr, cg, cb))).
+			Render(string(r)))
+	}
+	return b.String()
+}
+
+// footerNotice returns the text to show at the bottom-right of the screen,
+// opposite the help keys: the build version (always), and when a newer
+// release was found, a one-line "update available" hint above it. The version
+// line carries the same left-to-right gradient as the banner so it reads as a
+// brand accent rather than plain dim text. Returns "" when there is nothing
+// to show (no version and no update).
+func (m Model) footerNotice() string {
+	var lines []string
+	if m.updateVer != nil && m.updateVer.Available {
+		lines = append(lines, dimStyle.Render("↑ spruce "+m.updateVer.Latest+" is available"))
+	}
+	if m.version != "" {
+		lines = append(lines, gradientText(m.version))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
+}
+
 // headerView positions the header in the empty space above the body: one blank
 // line of top padding, with the content horizontally centered across the width.
-func headerView(width int) string {
+func (m Model) headerView(width int) string {
 	c := headerContent(width)
 	if width > 0 {
 		c = lipgloss.PlaceHorizontal(width, lipgloss.Center, c)
@@ -142,7 +192,7 @@ func headerView(width int) string {
 // headerHeight is the number of content lines headerView(width) produces (the
 // banner or the plain title), not counting the top-padding line, so the layout
 // below can reserve the right amount of vertical space.
-func headerHeight(width int) int {
+func (m Model) headerHeight(width int) int {
 	if len(bannerLines) == 0 || bannerWidth > width {
 		return 1
 	}
@@ -164,12 +214,27 @@ func (m Model) View() tea.View {
 		body = m.viewApplying()
 	}
 
-	v := tea.NewView(headerView(m.width) + "\n\n" + body)
+	main := m.headerView(m.width) + "\n\n" + body
+
+	bg := lipgloss.NewLayer(main)
+
+	layers := []*lipgloss.Layer{bg}
+
+	// Overlay the version / update-available notice at the bottom-right of the
+	// screen, opposite the help keys. Composited as a top-most layer so it
+	// floats over whatever the body rendered there.
+	if notice := m.footerNotice(); notice != "" && m.width > 0 && m.height > 0 {
+		nw := lipgloss.Width(notice)
+		nh := lipgloss.Height(notice)
+		x := max(m.width-nw, 0)
+		y := max(m.height-nh, 0)
+		layers = append(layers, lipgloss.NewLayer(notice).X(x).Y(y).Z(1))
+	}
+
+	rendered := lipgloss.NewCompositor(layers...).Render()
+
+	v := tea.NewView(rendered)
 	v.AltScreen = true
-	// Fill the whole alt-screen with the app's own dark canvas rather than riding
-	// the terminal's default background. Set at the screen level (not via a
-	// lipgloss Background), it paints every cell — panels, gaps, footer — cleanly,
-	// without the nested-reset "holes" a per-line background would leave.
 	v.BackgroundColor = lipgloss.Color(background)
 	return v
 }
@@ -265,7 +330,7 @@ func (m Model) sourceRows(src string) []row {
 // (4). With the plain 1-line title this is m.height-7. The apply screen's footer
 // is shorter, so it just leaves a couple extra blank lines at the bottom.
 func (m Model) selectAvailHeight() int {
-	return max(m.height-headerHeight(m.width)-6, 6)
+	return max(m.height-m.headerHeight(m.width)-6, 6)
 }
 
 // minStackPanelH is the floor a panel can shrink to: a border (2) plus a header

@@ -138,9 +138,15 @@ type Model struct {
 	applying map[string][]core.Update
 
 	// Flags from the CLI.
-	autoYes bool // -y: skip the gates and apply the default selection at once
-	demo    bool // --demo: use fake backends, no real system access
-	dryRun  bool // --dry-run: simulate the apply, mutating nothing
+	autoYes bool   // -y: skip the gates and apply the default selection at once
+	demo    bool   // --demo: use fake backends, no real system access
+	dryRun  bool   // --dry-run: simulate the apply, mutating nothing
+	version string // build-time version stamp; "dev" skips the update check
+
+	// updateVer is the result of the launch-time GitHub release check. nil
+	// until the check returns; when Available is true, the header renders a
+	// one-line notice below the banner.
+	updateVer *versionResult
 
 	tick     int  // monotonic 30fps counter driving the gradient border phase
 	ticking  bool // whether the gradient tick loop is currently running
@@ -152,6 +158,10 @@ type Options struct {
 	AutoYes bool
 	Demo    bool
 	DryRun  bool
+	// Version is the build-time version stamp ("dev" for a local build). When
+	// non-"dev", the TUI checks GitHub for a newer release on launch and shows
+	// an "update available" notice below the banner if one exists.
+	Version string
 }
 
 // New builds the initial model. ctx is cancelled when the user quits, which
@@ -178,13 +188,14 @@ func New(ctx context.Context, cancel context.CancelFunc, opts Options) Model {
 		autoYes:   opts.AutoYes,
 		demo:      opts.Demo,
 		dryRun:    opts.DryRun,
+		version:   opts.Version,
 		ticking:   true, // Init starts the gradient tick loop
 		spinning:  true, // Init starts the spinner tick loop
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(availableCmd(m.demo), tickCmd(), m.spinner.Tick)
+	return tea.Batch(availableCmd(m.demo), checkVersionCmd(m.ctx, m.version), tickCmd(), m.spinner.Tick)
 }
 
 // animating reports whether anything on screen needs the spinner/gradient
@@ -249,6 +260,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case plansResolvedMsg:
 		return m.onPlansResolved(msg)
+
+	case versionCheckedMsg:
+		m.updateVer = &msg.result
+		return m, nil
 	}
 
 	return m, nil
@@ -459,8 +474,12 @@ func (m Model) keySelecting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Toggle):
 		m.toggleCurrent()
 	case key.Matches(msg, m.keys.All):
+		m.setAllInSource(m.focusedSource(), true)
+	case key.Matches(msg, m.keys.AllGlobal):
 		m.setAll(true)
 	case key.Matches(msg, m.keys.None):
+		m.setAllInSource(m.focusedSource(), false)
+	case key.Matches(msg, m.keys.NoneGlobal):
 		m.setAll(false)
 	case key.Matches(msg, m.keys.DryRun):
 		m.dryRun = !m.dryRun
@@ -681,6 +700,21 @@ func (m *Model) setAll(v bool) {
 	for _, s := range m.panelSources() {
 		m.syncTable(s) // refresh every checkbox cell
 	}
+}
+
+// setAllInSource selects (or clears) every non-pinned update in a single
+// backend's panel, leaving the other managers' selections untouched.
+func (m *Model) setAllInSource(src string, v bool) {
+	if src == "" {
+		return
+	}
+	for _, r := range m.rows {
+		if r.source != src || r.update.Pinned {
+			continue
+		}
+		m.selected[r.update.ID()] = v
+	}
+	m.syncTable(src) // refresh this panel's checkbox cells
 }
 
 func (m Model) anySelected() bool {

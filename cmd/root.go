@@ -10,15 +10,21 @@ import (
 	"github.com/spf13/cobra"
 
 	"go.dalton.dog/spruce/internal/tui"
+	"go.dalton.dog/spruce/internal/version"
 )
 
 // Version is stamped into the styled `--version` output. Override at build time
-// with -ldflags "-X go.dalton.dog/spruce/cmd.Version=...".
+// with -ldflags "-X go.dalton.dog/spruce/cmd.Version=...". When left at the
+// default "dev", Execute resolves a richer label from the git working tree
+// (tag-commit-dev) so local builds show provenance instead of a bare "dev".
 var Version = "dev"
 
 // Execute builds the command tree and runs it through fang. Returns any error
 // bubbled up from the program so main can set the exit code.
 func Execute() error {
+	if Version == "dev" {
+		Version = version.ResolveDev()
+	}
 	return fang.Execute(context.Background(), newRootCmd(),
 		fang.WithoutCompletions(), fang.WithVersion(Version))
 }
@@ -42,6 +48,7 @@ func newRootCmd() *cobra.Command {
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
 
+			opts.Version = Version
 			p := tea.NewProgram(tui.New(ctx, cancel, opts))
 			_, err := p.Run()
 			return err

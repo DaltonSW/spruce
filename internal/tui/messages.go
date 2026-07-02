@@ -9,6 +9,7 @@ import (
 
 	"go.dalton.dog/spruce/internal/backend"
 	"go.dalton.dog/spruce/internal/core"
+	"go.dalton.dog/spruce/internal/version"
 )
 
 // tickCmd drives the spinner animation while discovering/applying. It runs at
@@ -33,6 +34,16 @@ type applyDoneMsg struct{}
 type plansResolvedMsg struct{ plans map[string]core.Plan }
 type tickMsg struct{}
 
+// versionResult is the outcome of the launch-time GitHub release check,
+// surfaced as versionCheckedMsg. Aliased from the version package so the model
+// can store it without its own copy of the type.
+type versionResult = version.Result
+
+// versionCheckedMsg carries the result of the background release check. When
+// Result.Available is true the header renders an update notice below the
+// banner; otherwise the header is unchanged.
+type versionCheckedMsg struct{ result versionResult }
+
 // --- commands --------------------------------------------------------------
 
 // availableCmd detects which backends exist (fast: stat/lookpath/dbus). This is
@@ -44,6 +55,17 @@ func availableCmd(demo bool) tea.Cmd {
 			return availableMsg{backends: backend.DemoBackends()}
 		}
 		return availableMsg{backends: backend.Available()}
+	}
+}
+
+// checkVersionCmd fetches the latest spruce release from GitHub and compares it
+// to the build-time version stamp. It runs once at launch, off the UI loop, so
+// a slow or unreachable network never delays the app. Any failure returns a
+// zero Result (no notice), making the check invisible when it can't succeed.
+// A "dev" build skips the check entirely.
+func checkVersionCmd(ctx context.Context, current string) tea.Cmd {
+	return func() tea.Msg {
+		return versionCheckedMsg{result: version.Check(ctx, current)}
 	}
 }
 

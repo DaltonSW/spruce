@@ -14,11 +14,19 @@ import (
 )
 
 // gridModel builds a Selecting model with a large System backend plus a few
-// small ones, mirroring the real "200+ packages" case.
+// small ones, mirroring the real "200+ packages" case. The terminal height is
+// derived from the actual banner height (which varies by font) so the panels
+// always have the same amount of room below the header as the original
+// 8bitfortress layout had at 30 rows.
 func gridModel(counts map[string]int) Model {
 	m := New(context.TODO(), func() {}, Options{})
 	m.state = stateSelecting
-	m.width, m.height = 100, 30
+	m.width = 100
+	bh := 1
+	if len(bannerLines) > 0 && bannerWidth <= m.width {
+		bh = len(bannerLines)
+	}
+	m.height = bh + 23 // 8bitfortress: 7+23=30; ember: 9+23=32
 	for _, src := range []string{"system", "brew", "flatpak", "snap"} {
 		n, ok := counts[src]
 		if !ok {
@@ -65,7 +73,7 @@ func TestSelectingFitsTerminal(t *testing.T) {
 	for _, cur := range []int{0, 100, 219} {
 		m.tableFor("system").SetCursor(cur)
 		m.syncTable("system")
-		full := headerView(m.width) + "\n\n" + m.viewSelecting() // mirrors View()'s wrapper
+		full := m.headerView(m.width) + "\n\n" + m.viewSelecting() // mirrors View()'s wrapper
 
 		lines := strings.Split(full, "\n")
 		if len(lines) > m.height {
@@ -145,7 +153,7 @@ func TestStackedLayout(t *testing.T) {
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 50, Height: 40})
 	m = updated.(Model)
 
-	full := headerView(m.width) + "\n\n" + m.viewSelecting()
+	full := m.headerView(m.width) + "\n\n" + m.viewSelecting()
 	lines := strings.Split(full, "\n")
 	if len(lines) > m.height {
 		t.Errorf("%d lines exceeds height %d", len(lines), m.height)
@@ -333,7 +341,7 @@ func TestReviewModal(t *testing.T) {
 		t.Errorf("modal should summarize the total across managers:\n%s", modal)
 	}
 
-	full := headerView(m.width) + "\n\n" + m.viewReviewing()
+	full := m.headerView(m.width) + "\n\n" + m.viewReviewing()
 	lines := strings.Split(full, "\n")
 	if len(lines) > m.height {
 		t.Errorf("composited review is %d lines, exceeds height %d", len(lines), m.height)
@@ -435,7 +443,7 @@ func TestApplyPanelListsPackages(t *testing.T) {
 	}
 
 	// Must still fit the terminal.
-	full := headerView(m.width) + "\n\n" + body
+	full := m.headerView(m.width) + "\n\n" + body
 	for i, ln := range strings.Split(full, "\n") {
 		if w := lipgloss.Width(ln); w > m.width {
 			t.Errorf("apply line %d width %d exceeds %d: %q", i, w, m.width, ln)
@@ -539,7 +547,7 @@ func TestSizeAndTimingDisplay(t *testing.T) {
 	// narrow two-panel size where the footer cluster and active note must shrink.
 	for _, w := range []int{160, 74} {
 		m.width = w
-		for i, ln := range strings.Split(headerView(m.width)+"\n\n"+m.viewApplying(), "\n") {
+		for i, ln := range strings.Split(m.headerView(m.width)+"\n\n"+m.viewApplying(), "\n") {
 			if lw := lipgloss.Width(ln); lw > m.width {
 				t.Errorf("w=%d apply line %d width %d exceeds %d: %q", w, i, lw, m.width, ln)
 			}
@@ -642,7 +650,7 @@ func TestColumnLayout(t *testing.T) {
 	m.width, m.height = 200, 40
 	m.syncAllPanels()
 
-	full := headerView(m.width) + "\n\n" + m.viewSelecting()
+	full := m.headerView(m.width) + "\n\n" + m.viewSelecting()
 	lines := strings.Split(full, "\n")
 	if len(lines) > m.height {
 		t.Errorf("%d lines exceeds height %d", len(lines), m.height)

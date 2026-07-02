@@ -38,17 +38,6 @@ const (
 	colorPinned  = ""
 )
 
-// 8bitfortress
-// bettervcr
-// boldpixels
-// digitaldisco
-// ember
-// lycheesoda
-// rockbox
-// snap
-
-const bannerFont = "8bitfortress"
-
 // gradPalette is the cyclic color loop the loading border sweeps through. The
 // dim unselected-border color dominates so the bright blue/purple/pink accents
 // form a small, compact highlight — a "comet" — that sweeps over a dim base,
@@ -94,10 +83,25 @@ var (
 	helpGroupStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(colGroup))
 )
 
+// 8bitfortress
+// bettervcr
+// boldpixels
+// digitaldisco
+// ember
+// lycheesoda
+// rockbox
+// snap
+
+const bannerFont = "bettervcr"
+
 func getBannerOpts() ansifonts.RenderOptions {
 	opts := ansifonts.DefaultRenderOptions()
 
 	opts.TextColor = gradientPrimary
+
+	// Spacing
+	opts.CharSpacing = 2
+	opts.ScaleFactor = 0.5
 
 	// Gradient
 	opts.GradientColor = gradientSecondary
@@ -107,8 +111,8 @@ func getBannerOpts() ansifonts.RenderOptions {
 	// Shadow
 	opts.ShadowEnabled = true
 	opts.ShadowStyle = ansifonts.MediumShade
-	opts.ShadowHorizontalOffset = 1
-	opts.ShadowVerticalOffset = 1
+	// opts.ShadowHorizontalOffset = 2
+	// opts.ShadowVerticalOffset = 2
 
 	return opts
 }
