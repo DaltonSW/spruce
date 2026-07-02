@@ -62,6 +62,7 @@ Each is discovered at runtime; only the ones present on the machine appear.
 | **brew** | `brew outdated --json=v2` for the list; `brew upgrade` under a PTY for progress |
 | **flatpak** | per-remote `flatpak remote-ls --updates`; `flatpak update -y` to apply |
 | **snap** | snapd REST API over `/run/snapd.socket`; polls the change for progress |
+| **go** | Packages installed via `go install`; Scans `$GOBIN/$GOPATH` for installed packages |
 
 AppImage is intentionally out of scope (no central registry to query).
 
