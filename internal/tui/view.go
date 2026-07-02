@@ -141,6 +141,11 @@ func (m Model) View() tea.View {
 
 	v := tea.NewView(headerView(m.width) + "\n\n" + body)
 	v.AltScreen = true
+	// Fill the whole alt-screen with the app's own dark canvas rather than riding
+	// the terminal's default background. Set at the screen level (not via a
+	// lipgloss Background), it paints every cell — panels, gaps, footer — cleanly,
+	// without the nested-reset "holes" a per-line background would leave.
+	v.BackgroundColor = lipgloss.Color(background)
 	return v
 }
 
