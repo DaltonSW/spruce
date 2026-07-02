@@ -15,7 +15,9 @@ import (
 // machine-readable columns; the upgrade is `flatpak update -y` under a PTY.
 type Flatpak struct{}
 
-func (Flatpak) Name() string { return "flatpak" }
+func (Flatpak) Name() string  { return "flatpak" }
+func (Flatpak) Icon() string  { return "" }       // nf-fa-cube
+func (Flatpak) Color() string { return "#4a90d9" } // blue — the Flatpak brand
 
 func (Flatpak) Available() bool {
 	_, err := exec.LookPath("flatpak")

@@ -14,21 +14,26 @@ import (
 // list, small lists, an up-to-date backend, and an apply that fails partway.
 func DemoBackends() []core.Backend {
 	return []core.Backend{
-		demoBackend{name: "system", count: 42, checkDelay: 3800 * time.Millisecond},
-		demoBackend{name: "brew", count: 6, checkDelay: 1200 * time.Millisecond},
-		demoBackend{name: "flatpak", count: 3, checkDelay: 2300 * time.Millisecond, failApply: true},
-		demoBackend{name: "snap", count: 0, checkDelay: 800 * time.Millisecond},
+		demoBackend{name: "system", icon: "", color: "#a3be8c", count: 42, checkDelay: 3800 * time.Millisecond},
+		demoBackend{name: "brew", icon: "", color: "#f6b552", count: 6, checkDelay: 1200 * time.Millisecond},
+		demoBackend{name: "flatpak", icon: "", color: "#4a90d9", count: 3, checkDelay: 2300 * time.Millisecond, failApply: true},
+		demoBackend{name: "snap", icon: "", color: "#e95420", count: 0, checkDelay: 800 * time.Millisecond},
+		demoBackend{name: "go", icon: "", color: "#00add8", count: 4, checkDelay: 1600 * time.Millisecond},
 	}
 }
 
 type demoBackend struct {
 	name       string
+	icon       string
+	color      string
 	count      int
 	checkDelay time.Duration
 	failApply  bool // emit an error partway through Apply, to exercise that path
 }
 
 func (d demoBackend) Name() string  { return d.name }
+func (d demoBackend) Icon() string  { return d.icon }
+func (d demoBackend) Color() string { return d.color }
 func (demoBackend) Available() bool { return true }
 
 func (d demoBackend) Check(ctx context.Context) ([]core.Update, error) {

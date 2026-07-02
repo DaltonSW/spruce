@@ -266,12 +266,59 @@ func indent(line string) string {
 	return strings.Repeat(" ", panelGutter) + line
 }
 
-// panelHeader renders a panel's header line — a bold accent title with a dim
-// right-hand note (count/spinner/timer) beside it — padded to the content width.
-// Shared by the selecting and applying panels so the two can't drift.
-func panelHeader(src, right string, contentW int) string {
-	title := truncate(strings.ToUpper(src), max(contentW-lipgloss.Width(right), 1))
-	return padRight(groupStyle.Render(title)+dimStyle.Render(right), contentW)
+// sourceColor is a backend's accent color (its Color()), or "" when it declares
+// none or isn't known — callers fall back to the UI default in that case.
+func (m Model) sourceColor(src string) string {
+	if b := m.byName[src]; b != nil {
+		return b.Color()
+	}
+	return ""
+}
+
+// sourceIcon is the glyph a backend shows beside its name (its Icon()), or "".
+func (m Model) sourceIcon(src string) string {
+	if b := m.byName[src]; b != nil {
+		return b.Icon()
+	}
+	return ""
+}
+
+// sourceLabel is a backend's icon + upper-cased name rendered in its accent
+// color — the identity chip the confirm modals show at the head of each row.
+func (m Model) sourceLabel(src string) string {
+	style := groupStyle
+	if c := m.sourceColor(src); c != "" {
+		style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(c))
+	}
+	name := strings.ToUpper(src)
+	if icon := m.sourceIcon(src); icon != "" {
+		return style.Render(icon + " " + name)
+	}
+	return style.Render(name)
+}
+
+// panelHeader renders a panel's header line — the backend's icon and name in its
+// accent color, with a dim right-hand note (count/spinner/timer) beside it —
+// padded to the content width. Shared by the selecting and applying panels so the
+// two can't drift. color/icon are the backend's; "" falls back to the UI accent
+// and no icon.
+func panelHeader(src, right string, contentW int, icon, color string) string {
+	style := groupStyle
+	if color != "" {
+		style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(color))
+	}
+	// Reserve room for the icon (+ its trailing space) so the name truncates, not
+	// the icon, on a narrow panel.
+	iconW := 0
+	if icon != "" {
+		iconW = lipgloss.Width(icon) + 1
+	}
+	name := truncate(strings.ToUpper(src), max(contentW-lipgloss.Width(right)-iconW, 1))
+	title := name
+	if icon != "" {
+		title = icon + " " + name
+	}
+	return padRight(style.Render(title)+dimStyle.Render(right), contentW)
 }
 
 // panelLayout returns the total (bordered) height of each panel, in order, given
@@ -485,7 +532,7 @@ func (m Model) renderPanel(src string, totalW, totalH int, focused bool) string 
 	}
 
 	lines := make([]string, 0, innerH)
-	lines = append(lines, panelHeader(src, right, contentW))
+	lines = append(lines, panelHeader(src, right, contentW, m.sourceIcon(src), m.sourceColor(src)))
 
 	contentH := max(innerH-1, 1)
 	switch {
@@ -535,23 +582,48 @@ func (m Model) renderPanel(src string, totalW, totalH int, focused bool) string 
 	}
 
 	// While checking, draw a gradient border whose phase rotates each tick;
-	// otherwise a solid border (pink when focused, dim otherwise).
+	// otherwise a solid border in the backend's own color, brightening to the
+	// accent when focused.
 	if checking {
 		return gradientBox(lines, innerW, innerH, float64(m.tick)*0.03)
 	}
-	return solidBox(lines, focused)
+	return solidBox(lines, focused, m.sourceColor(src))
 }
 
-// solidBox wraps content lines in a rounded border: pink when focused, dim
-// otherwise.
-func solidBox(content []string, focused bool) string {
-	border := lipgloss.NewStyle().Border(lipgloss.RoundedBorder())
-	if focused {
-		border = border.BorderForeground(lipgloss.Color(colAccent))
-	} else {
-		border = border.BorderForeground(lipgloss.Color(dimBorder))
+// solidBox wraps content lines in a border that keeps the backend's own color in
+// every state, using two cues to mark the focused panel: the focused panel keeps
+// its color at full strength and gains a heavier thick border, while unfocused
+// panels dim their color (blended toward the background) and keep the lighter
+// rounded border — so the selected panel reads clearly without losing its hue.
+// A backend that declares no color falls back to the accent (focused) or the dim
+// border (unfocused).
+func solidBox(content []string, focused bool, color string) string {
+	style := lipgloss.NewStyle()
+	switch {
+	case focused && color != "":
+		style = style.Border(lipgloss.ThickBorder()).BorderForeground(lipgloss.Color(color))
+	case focused:
+		style = style.Border(lipgloss.ThickBorder()).BorderForeground(lipgloss.Color(colAccent))
+	case color != "":
+		style = style.Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(dimColor(color)))
+	default:
+		style = style.Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(dimBorder))
 	}
-	return border.Render(strings.Join(content, "\n"))
+	return style.Render(strings.Join(content, "\n"))
+}
+
+// dimColor mutes a hex color for an unfocused panel's border: it mostly drops
+// saturation (so the color still reads as itself, just quieter) and only lightly
+// darkens, keeping the hue identifiable rather than blending it into a muddy
+// near-background shade. The focused panel — full color + thick border — stays
+// the clear standout. A color that won't parse is returned unchanged.
+func dimColor(hex string) string {
+	c, err := colorful.Hex(hex)
+	if err != nil {
+		return hex
+	}
+	h, s, l := c.Hsl()
+	return colorful.Hsl(h, s*0.5, l*0.85).Clamped().Hex()
 }
 
 // renderStack lays panels out as a single full-width vertical stack at the given
@@ -568,7 +640,7 @@ func renderStack(sources []string, totalW int, heights []int, render func(src st
 }
 
 // gradientBox wraps content (exactly innerH lines, each innerW wide) in a
-// rounded border whose colour sweeps the palette around the perimeter. phase
+// rounded border whose color sweeps the palette around the perimeter. phase
 // (in palette-loops) rotates the gradient; advance it over time to animate.
 func gradientBox(content []string, innerW, innerH int, phase float64) string {
 	w, h := innerW+2, innerH+2
@@ -758,7 +830,7 @@ func (m Model) installModal() string {
 		t := m.installTarget
 		u := t.update
 		line := fmt.Sprintf("%s  %s",
-			padRight(groupStyle.Render(strings.ToUpper(t.source)), 10),
+			padRight(m.sourceLabel(t.source), 12),
 			u.Name)
 		body = append(body, line)
 		ver := fmt.Sprintf("%s → %s", u.CurrentVersion, u.NewVersion)
@@ -823,7 +895,7 @@ func (m Model) reviewModal() string {
 		}
 		totalBytes += bytes
 		line := fmt.Sprintf("%s  %s",
-			padRight(groupStyle.Render(strings.ToUpper(s)), 10),
+			padRight(m.sourceLabel(s), 12),
 			padRight(fmt.Sprintf("%d package%s", n, plural(n)), 14))
 		if bytes > 0 {
 			line += dimStyle.Render(padLeft(formatBytes(bytes), 9))
@@ -1032,7 +1104,7 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 	}
 
 	lines := make([]string, 0, innerH)
-	lines = append(lines, panelHeader(src, right, contentW))
+	lines = append(lines, panelHeader(src, right, contentW, m.sourceIcon(src), m.sourceColor(src)))
 	contentH := max(innerH-1, 1)
 
 	body := make([]string, 0, contentH)
@@ -1130,7 +1202,7 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 		lines[i] = indent(lines[i])
 	}
 
-	// Border colour reflects state; animate the gradient while still working.
+	// Border color reflects state; animate the gradient while still working.
 	switch {
 	case st != nil && st.failed:
 		return solidBoxColor(lines, colErr)
@@ -1411,7 +1483,7 @@ func padLeft(s string, w int) string {
 }
 
 // progressBar renders a [████░░░░] bar of the given width for fraction f, using
-// the bubbles progress component. The fill colour reflects state (accent active,
+// the bubbles progress component. The fill color reflects state (accent active,
 // green finished, red failed) and the empty track stays dim, matching the look
 // the hand-rolled bar had.
 func progressBar(f float64, w int, st *srcState) string {
@@ -1425,7 +1497,7 @@ func progressBar(f float64, w int, st *srcState) string {
 	return coloredBar(f, w, fill)
 }
 
-// rowProgressBar draws one apply row's bar, coloured by that row's status —
+// rowProgressBar draws one apply row's bar, colored by that row's status —
 // dim/idle while pending, accent while downloading, green once done, red on
 // failure — so completed rows read as a full green wall as the run progresses.
 // The bar is wrapped in dim brackets so the per-row bars read as distinct
@@ -1446,7 +1518,7 @@ func rowProgressBar(f float64, w int, status pkgStat) string {
 	return dimStyle.Render("[") + coloredBar(f, w-2, fill) + dimStyle.Render("]")
 }
 
-// coloredBar renders a [████░░░░] bar of the given width and fill colour using
+// coloredBar renders a [████░░░░] bar of the given width and fill color using
 // the bubbles progress component; the empty track stays dim, matching dimStyle.
 func coloredBar(f float64, w int, fill string) string {
 	if w < 4 {
@@ -1521,7 +1593,7 @@ func stripCR(s string) string {
 	return strings.TrimRight(s, "\r\n")
 }
 
-// solidBoxColor wraps content lines in a rounded border of the given colour.
+// solidBoxColor wraps content lines in a rounded border of the given color.
 func solidBoxColor(content []string, color string) string {
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

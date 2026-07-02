@@ -70,6 +70,15 @@ type Backend interface {
 	// Name is a stable identifier, e.g. "system", "brew", "flatpak", "snap".
 	Name() string
 
+	// Icon is a short glyph shown beside the backend's name in its panel — an
+	// emoji or Nerd Font rune. May be "" for no icon.
+	Icon() string
+
+	// Color is this backend's accent color, used for its panel name and border.
+	// A lipgloss color string (an ANSI index like "12" or a hex like "#00add8");
+	// "" falls back to the UI's default accent.
+	Color() string
+
 	// Available reports whether this manager exists on the current system
 	// (binary on PATH, daemon socket present, D-Bus name owned, ...).
 	Available() bool

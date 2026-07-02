@@ -6,9 +6,9 @@ import (
 	"github.com/superstarryeyes/bit/ansifonts"
 )
 
-// palette is every colour the UI uses, in one place. These are base-16 ANSI
+// palette is every color the UI uses, in one place. These are base-16 ANSI
 // codes (0–15) rather than xterm-256 shades, so the UI rides the user's own
-// terminal theme — the colours they've already customised — instead of pinning
+// terminal theme — the colors they've already customised — instead of pinning
 // specific hues. The one deliberate exception is the animated "checking" border,
 // which lives in gradPalette as hex because colorful.Hex requires it.
 const (
@@ -46,8 +46,8 @@ const (
 
 const bannerFont = "8bitfortress"
 
-// gradPalette is the cyclic colour loop the loading border sweeps through. The
-// dim unselected-border colour dominates so the bright blue/purple/pink accents
+// gradPalette is the cyclic color loop the loading border sweeps through. The
+// dim unselected-border color dominates so the bright blue/purple/pink accents
 // form a small, compact highlight — a "comet" — that sweeps over a dim base,
 // making the motion read clearly instead of blending into a uniform glow. The
 // run of dim stops keeps the bright arc to a small fraction of the perimeter.

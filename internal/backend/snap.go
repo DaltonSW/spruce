@@ -20,7 +20,9 @@ const snapSocket = "/run/snapd.socket"
 // Snap talks to snapd over its unix socket.
 type Snap struct{}
 
-func (Snap) Name() string { return "snap" }
+func (Snap) Name() string  { return "snap" }
+func (Snap) Icon() string  { return "" }       // nf-linux-ubuntu
+func (Snap) Color() string { return "#e95420" } // orange — Snapcraft/Ubuntu
 
 func (Snap) Available() bool {
 	_, err := os.Stat(snapSocket)

@@ -15,6 +15,7 @@ func all() []core.Backend {
 		Brew{},
 		Flatpak{},
 		Snap{},
+		Go{},
 	}
 }
 

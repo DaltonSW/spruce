@@ -205,6 +205,8 @@ func TestEmptyBackendShowsPanel(t *testing.T) {
 type fakeBackend struct{ name string }
 
 func (f fakeBackend) Name() string    { return f.name }
+func (fakeBackend) Icon() string      { return "" }
+func (fakeBackend) Color() string     { return "" }
 func (f fakeBackend) Available() bool { return true }
 func (fakeBackend) Check(context.Context) ([]core.Update, error) {
 	return nil, nil

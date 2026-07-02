@@ -46,7 +46,9 @@ const (
 	pkFilterInstalled = uint64(1 << 2) // PK_FILTER_ENUM_INSTALLED
 )
 
-func (PackageKit) Name() string { return "system" }
+func (PackageKit) Name() string  { return "system" }
+func (PackageKit) Icon() string  { return "" }       // nf-fa-linux (Tux)
+func (PackageKit) Color() string { return "#a3be8c" } // green — core system packages
 
 func (PackageKit) Available() bool {
 	conn, err := dbus.ConnectSystemBus()

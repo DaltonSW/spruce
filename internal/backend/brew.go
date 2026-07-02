@@ -15,7 +15,9 @@ import (
 // JSON for the update list and PTY-wrap `brew upgrade` for live progress.
 type Brew struct{}
 
-func (Brew) Name() string { return "brew" }
+func (Brew) Name() string  { return "brew" }
+func (Brew) Icon() string  { return "" }       // nf-fa-beer
+func (Brew) Color() string { return "#f6b552" } // amber — the Homebrew mug
 
 func (Brew) Available() bool {
 	_, err := exec.LookPath("brew")
