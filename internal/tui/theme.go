@@ -15,11 +15,14 @@ const (
 	// ANSI 0-255 codes
 	colAccent = "13" // bright magenta — the single primary accent: titles, panel
 	//                    headers, the ▶ cursor, focused borders, active progress.
-	colDim  = "8"  // bright black (grey) — secondary text and the empty progress track.
-	colHelp = "8"  // bright black (grey) — the help footer and the done-state border.
-	colOk   = "10" // bright green — selected, done, finished.
-	colErr  = "9"  // bright red — errors and failed state.
-	colPin  = "11" // bright yellow — the (pin) badge and the DRY RUN tag.
+	colDim   = "8"  // bright black (grey) — secondary text and the empty progress track.
+	colHelp  = "8"  // bright black (grey) — the help footer and the done-state border.
+	colGroup = "14" // bright cyan — the footer group labels (Move/Select/Do), a
+	//                    distinct accent that pairs with the magenta keys so the
+	//                    labels read as section headers rather than blending in.
+	colOk  = "10" // bright green — selected, done, finished.
+	colErr = "9"  // bright red — errors and failed state.
+	colPin = "11" // bright yellow — the (pin) badge and the DRY RUN tag.
 
 	// Hex codes
 	dimBorder = "#585858"
@@ -86,6 +89,9 @@ var (
 	// helpKeyStyle styles the footer keycaps: bold accent so the actionable keys
 	// pop, while the action labels (dimStyle) and separators (helpStyle) recede.
 	helpKeyStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(colAccent))
+	// helpGroupStyle labels the footer groups: bold cyan so each row reads as a
+	// section header down the left edge, distinct from the magenta keys.
+	helpGroupStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(colGroup))
 )
 
 func getBannerOpts() ansifonts.RenderOptions {

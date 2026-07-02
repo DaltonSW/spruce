@@ -69,14 +69,21 @@ func defaultKeys() keyMap {
 // Footer help, one slice per state — only the bindings that should appear, in
 // display order. help.Model renders each as "<key> <desc>" joined by " · ".
 
-// selectingHelp is rendered across three grouped footer rows so every binding
+// helpGroup is one labeled cluster of bindings in a multi-row footer.
+type helpGroup struct {
+	label    string
+	bindings []key.Binding
+}
+
+// selectingHelp is rendered across three labeled footer rows so every binding
 // stays visible without overflowing an ~100-col terminal: movement, then
-// selection, then actions. The view renders each row with its own ShortHelpView.
-func (k keyMap) selectingHelp() [][]key.Binding {
-	return [][]key.Binding{
-		{k.Up, k.Right, k.PageUp, k.Home},
-		{k.Toggle, k.All, k.None},
-		{k.DryRun, k.Install, k.Review, k.Rescan, k.Quit},
+// selection, then actions. The view (helpGroups) prints each row with its label
+// aligned in a left-hand column so the grouping reads at a glance.
+func (k keyMap) selectingHelp() []helpGroup {
+	return []helpGroup{
+		{"Move", []key.Binding{k.Up, k.Right, k.PageUp, k.Home}},
+		{"Select", []key.Binding{k.Toggle, k.All, k.None}},
+		{"Do", []key.Binding{k.DryRun, k.Install, k.Review, k.Rescan, k.Quit}},
 	}
 }
 

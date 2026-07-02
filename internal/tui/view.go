@@ -18,14 +18,15 @@ import (
 	"go.dalton.dog/spruce/internal/core"
 )
 
-// helpKeycap renders one binding as a dim-bracketed accent keycap plus its dim
-// label — "[q] quit" — the brackets receding so the key letter pops.
+// helpKeycap renders one binding as a bold-accent key plus its dim label —
+// "q quit" — the key colored so it pops against the receding grey description,
+// no brackets so the footer stays clean.
 func helpKeycap(b key.Binding) string {
 	h := b.Help()
 	if h.Key == "" && h.Desc == "" {
 		return ""
 	}
-	cap := helpStyle.Render("[") + helpKeyStyle.Render(h.Key) + helpStyle.Render("]")
+	cap := helpKeyStyle.Render(h.Key)
 	if h.Desc == "" {
 		return cap
 	}
@@ -33,9 +34,10 @@ func helpKeycap(b key.Binding) string {
 }
 
 // helpRow joins bindings into one footer line with the shared " · " separator,
-// skipping disabled/empty bindings. Replaces help.ShortHelpView so the keycaps
-// can carry brackets the bubbles component can't style separately; like it, a row
-// wider than width is truncated to the items that fit, with a trailing ellipsis.
+// skipping disabled/empty bindings. Replaces help.ShortHelpView so the key and
+// its description can be styled separately (bold-accent key, dim label); like it,
+// a row wider than width is truncated to the items that fit, with a trailing
+// ellipsis.
 func helpRow(width int, bindings []key.Binding) string {
 	sep := helpStyle.Render(sepTight)
 	sepW := lipgloss.Width(sep)
@@ -57,17 +59,39 @@ func helpRow(width int, bindings []key.Binding) string {
 			s = sep + s
 			w += sepW
 		}
-		// Mirror help.ShortHelpView: once an item overflows the width, stop and
-		// mark the truncation — but only if the ellipsis itself fits; otherwise
-		// there's no room to signal it, so add the item and let it be the last.
+		// Once an item won't fit, stop rather than overflow the row (the layout
+		// budgets on the footer fitting width). Append the ellipsis to mark the
+		// truncation when there's room for it; otherwise just cut.
 		if width > 0 && total+w > width {
-			if total+tailW < width {
+			if total+tailW <= width {
 				b.WriteString(tail)
-				break
 			}
+			break
 		}
 		total += w
 		b.WriteString(s)
+	}
+	return b.String()
+}
+
+// helpGroups renders labeled footer rows, one per group, with the labels padded
+// to a common width so the keycaps align into a column and the labels read as a
+// legend down the left edge. Each row's bindings go through helpRow, so per-row
+// width truncation still applies (minus the label gutter).
+func helpGroups(width int, groups []helpGroup) string {
+	labelW := 0
+	for _, g := range groups {
+		if w := lipgloss.Width(g.label); w > labelW {
+			labelW = w
+		}
+	}
+	var b strings.Builder
+	for i, g := range groups {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		label := helpGroupStyle.Render(padRight(g.label, labelW))
+		b.WriteString(label + "  " + helpRow(width-labelW-2, g.bindings))
 	}
 	return b.String()
 }
@@ -180,12 +204,7 @@ func (m Model) viewSelecting() string {
 	}
 	status += m.dryRunBadge()
 	b.WriteString(status + "\n")
-	for i, hr := range m.keys.selectingHelp() {
-		if i > 0 {
-			b.WriteString("\n")
-		}
-		b.WriteString(helpRow(m.width, hr))
-	}
+	b.WriteString(helpGroups(m.width, m.keys.selectingHelp()))
 	return b.String()
 }
 
