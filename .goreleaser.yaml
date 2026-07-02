@@ -23,6 +23,20 @@ builds:
     ldflags:
       - -s -w -X go.dalton.dog/spruce/cmd.Version={{.Version}}
 
+homebrew_casks:
+  - name: prism
+    homepage: "https://dalton.dog/prism"
+
+    commit_author:
+      name: DaltonDogBot
+      email: "bot@dalton.dog"
+
+    repository:
+      owner: DaltonSW
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.GITHUB_TOKEN }}"
+
 archives:
   - formats: [tar.gz]
     name_template: >-
