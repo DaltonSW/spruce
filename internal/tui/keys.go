@@ -17,6 +17,7 @@ type keyMap struct {
 	Right    key.Binding
 	Tab      key.Binding
 	ShiftTab key.Binding
+	Jump     key.Binding
 	Toggle   key.Binding
 	All      key.Binding
 	None     key.Binding
@@ -50,6 +51,11 @@ func defaultKeys() keyMap {
 		Right:    key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("←/→/tab", "panel")),
 		Tab:      key.NewBinding(key.WithKeys("tab")),
 		ShiftTab: key.NewBinding(key.WithKeys("shift+tab")),
+		// Jump straight to a panel by its number badge (1–9).
+		Jump: key.NewBinding(
+			key.WithKeys("1", "2", "3", "4", "5", "6", "7", "8", "9"),
+			key.WithHelp("1–9", "jump"),
+		),
 		Toggle:   key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "toggle")),
 		All:      key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "all")),
 		None:     key.NewBinding(key.WithKeys("N"), key.WithHelp("N", "none")),
@@ -81,7 +87,7 @@ type helpGroup struct {
 // aligned in a left-hand column so the grouping reads at a glance.
 func (k keyMap) selectingHelp() []helpGroup {
 	return []helpGroup{
-		{"Move", []key.Binding{k.Up, k.Right, k.PageUp, k.Home}},
+		{"Move", []key.Binding{k.Up, k.Right, k.Jump, k.PageUp, k.Home}},
 		{"Select", []key.Binding{k.Toggle, k.All, k.None}},
 		{"Do", []key.Binding{k.DryRun, k.Install, k.Review, k.Rescan, k.Quit}},
 	}

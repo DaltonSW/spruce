@@ -594,3 +594,88 @@ func TestSelectingSinglePanel(t *testing.T) {
 		t.Errorf("single panel missing title:\n%s", body)
 	}
 }
+
+// Pressing a panel's number focuses it directly; a digit past the panel count is
+// a no-op (focus doesn't move, no panic).
+func TestNumberJump(t *testing.T) {
+	m := gridModel(map[string]int{"system": 8, "brew": 3, "flatpak": 2, "snap": 1})
+	if len(m.panels()) != 4 {
+		t.Fatalf("expected 4 panels, got %d", len(m.panels()))
+	}
+	if m.focus != 0 {
+		t.Fatalf("focus should start at 0, got %d", m.focus)
+	}
+
+	// "3" jumps to the third panel (index 2).
+	tm, _ := m.keySelecting(tea.KeyPressMsg{Code: '3', Text: "3"})
+	m = tm.(Model)
+	if m.focus != 2 {
+		t.Errorf("pressing 3 should focus panel index 2, got %d", m.focus)
+	}
+
+	// "9" is past the panel count — focus must not move.
+	tm, _ = m.keySelecting(tea.KeyPressMsg{Code: '9', Text: "9"})
+	m = tm.(Model)
+	if m.focus != 2 {
+		t.Errorf("out-of-range digit should be a no-op, focus moved to %d", m.focus)
+	}
+}
+
+// Each panel header carries its 1-based number badge, so the number the user
+// presses to jump is visible on the panel.
+func TestPanelHeaderNumberBadge(t *testing.T) {
+	h := panelHeader(3, "brew", "", 40, "", "")
+	if !strings.Contains(h, "3") {
+		t.Errorf("header should show the panel number badge:\n%q", h)
+	}
+	if !strings.Contains(h, "BREW") {
+		t.Errorf("header should show the backend name:\n%q", h)
+	}
+}
+
+// On a wide terminal the tall system list shares the width with a second column:
+// the system panel sits in a left column while the small backends stack in the
+// column to its right — using the horizontal space instead of scrolling under a
+// wasted right margin. The whole thing still fits the terminal.
+func TestColumnLayout(t *testing.T) {
+	m := gridModel(map[string]int{"system": 220, "brew": 6, "flatpak": 3, "snap": 2})
+	m.width, m.height = 200, 40
+	m.syncAllPanels()
+
+	full := headerView(m.width) + "\n\n" + m.viewSelecting()
+	lines := strings.Split(full, "\n")
+	if len(lines) > m.height {
+		t.Errorf("%d lines exceeds height %d", len(lines), m.height)
+	}
+	for i, ln := range lines {
+		if w := lipgloss.Width(ln); w > m.width {
+			t.Errorf("line %d width %d exceeds %d", i, w, m.width)
+		}
+	}
+	for _, want := range []string{"SYSTEM", "BREW", "FLATPAK", "SNAP"} {
+		if !strings.Contains(full, want) {
+			t.Errorf("panel %q not visible:\n%s", want, full)
+		}
+	}
+
+	// System (left column) and the first small backend (right column) are drawn
+	// side by side, so their header lines land on the same output line. The small
+	// backends stack within the right column, so no two of them share a line.
+	sideBySide := false
+	for _, ln := range lines {
+		if strings.Contains(ln, "SYSTEM") && strings.Contains(ln, "BREW") {
+			sideBySide = true
+		}
+		if strings.Contains(ln, "BREW") && strings.Contains(ln, "FLATPAK") {
+			t.Errorf("small backends should stack, not share a line:\n%s", ln)
+		}
+	}
+	if !sideBySide {
+		t.Errorf("system and the right column should sit side by side:\n%s", full)
+	}
+
+	// The system panel is a column, roughly half the width — not the full terminal.
+	if w := m.panelWidth("system"); w >= m.width-2 {
+		t.Errorf("system panel width %d should be a column, not near-full %d", w, m.width)
+	}
+}

@@ -4,6 +4,7 @@ package tui
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"charm.land/bubbles/v2/key"
@@ -448,6 +449,12 @@ func (m Model) keySelecting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.ShiftTab):
 		if n := len(m.panels()); n > 0 {
 			m.setFocus((m.focus - 1 + n) % n)
+		}
+	case key.Matches(msg, m.keys.Jump):
+		// Pressing a panel's number badge focuses it directly. Bindings don't
+		// report which key matched, so parse the digit from the keypress.
+		if d, err := strconv.Atoi(msg.String()); err == nil && d >= 1 && d <= len(m.panels()) {
+			m.setFocus(d - 1)
 		}
 	case key.Matches(msg, m.keys.Toggle):
 		m.toggleCurrent()

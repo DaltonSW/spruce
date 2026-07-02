@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -188,9 +189,8 @@ func (m Model) viewSelecting() string {
 	if m.focus >= 0 && m.focus < len(ps) {
 		focusedSrc = ps[m.focus]
 	}
-	heights := panelLayout(m.panelContentLines(), m.selectAvailHeight())
-	grid := renderStack(ps, m.width, heights, func(src string, w, h int) string {
-		return m.renderPanel(src, w, h, src == focusedSrc)
+	grid := m.renderColumns(m.selectLayout(), func(box panelBox) string {
+		return m.renderPanel(box.src, box.w, box.h, box.index, box.src == focusedSrc)
 	})
 
 	var b strings.Builder
@@ -326,23 +326,30 @@ func (m Model) sourceLabel(src string) string {
 // padded to the content width. Shared by the selecting and applying panels so the
 // two can't drift. color/icon are the backend's; "" falls back to the UI accent
 // and no icon.
-func panelHeader(src, right string, contentW int, icon, color string) string {
+func panelHeader(index int, src, right string, contentW int, icon, color string) string {
 	style := groupStyle
 	if color != "" {
 		style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(color))
 	}
-	// Reserve room for the icon (+ its trailing space) so the name truncates, not
-	// the icon, on a narrow panel.
+	// A bold-accent number badge ("1 ") marks each panel; it's the key you press
+	// to jump to it. Reserve its width (and the icon's) so the name truncates, not
+	// the badge or icon, on a narrow panel.
+	badge, badgeW := "", 0
+	if index > 0 {
+		n := strconv.Itoa(index)
+		badge = helpKeyStyle.Render(n) + " "
+		badgeW = lipgloss.Width(n) + 1
+	}
 	iconW := 0
 	if icon != "" {
 		iconW = lipgloss.Width(icon) + 1
 	}
-	name := truncate(strings.ToUpper(src), max(contentW-lipgloss.Width(right)-iconW, 1))
+	name := truncate(strings.ToUpper(src), max(contentW-lipgloss.Width(right)-iconW-badgeW, 1))
 	title := name
 	if icon != "" {
 		title = icon + " " + name
 	}
-	return padRight(style.Render(title)+dimStyle.Render(right), contentW)
+	return padRight(badge+style.Render(title)+dimStyle.Render(right), contentW)
 }
 
 // panelLayout returns the total (bordered) height of each panel, in order, given
@@ -357,20 +364,31 @@ func panelHeader(src, right string, contentW int, icon, color string) string {
 func panelLayout(content []int, availH int) []int {
 	heights := make([]int, len(content))
 	naturals := make([]int, len(content))
-	total := 0
+	floors := make([]int, len(content))
 	for i, c := range content {
 		naturals[i] = max(c+3, minStackPanelH) // 2 border + 1 header + content
 		heights[i] = naturals[i]
-		total += heights[i]
+		floors[i] = minStackPanelH
 	}
+	return shrinkToFit(heights, naturals, floors, availH)
+}
 
-	// Reclaim the overflow from the panels with the largest natural heights first,
-	// draining each fully to the floor before moving to the next-largest — so the
-	// system list absorbs the squeeze and the small panels keep their full height.
+// shrinkToFit drains a set of panel/band heights down to availH, reclaiming from
+// the entry with the largest natural height first and draining it fully to its
+// floor before touching the next-largest — so the biggest item (the system list)
+// absorbs the squeeze and scrolls while smaller ones stay whole. heights is
+// mutated in place and returned; floors[i] is the smallest height entry i may
+// shrink to. When everything is already at its floor the total may still exceed
+// availH (the caller overflows the screen), matching the old behavior.
+func shrinkToFit(heights, naturals, floors []int, availH int) []int {
+	total := 0
+	for _, h := range heights {
+		total += h
+	}
 	for total > availH {
 		idx := -1
 		for i, h := range heights {
-			if h <= minStackPanelH {
+			if h <= floors[i] {
 				continue // already at the floor; can't shrink further
 			}
 			if idx < 0 || naturals[i] > naturals[idx] {
@@ -380,24 +398,187 @@ func panelLayout(content []int, availH int) []int {
 		if idx < 0 {
 			break // all at the floor; the stack overflows the screen
 		}
-		take := min(heights[idx]-minStackPanelH, total-availH)
+		take := min(heights[idx]-floors[idx], total-availH)
 		heights[idx] -= take
 		total -= take
 	}
 	return heights
 }
 
-// panelTotalHeight is the bordered height (rows incl. border) of one panel.
-func (m Model) panelTotalHeight(src string) int {
-	ps := m.panels()
-	heights := panelLayout(m.panelContentLines(), m.selectAvailHeight())
-	for i, s := range ps {
-		if s == src {
-			return heights[i]
+// Column layout constants. minColW is the narrowest a column may get before we
+// stop adding columns (below it, rows aren't readable), so on a narrow terminal
+// the layout collapses to a single full-width stack. colGap is the blank column
+// between adjacent columns.
+const (
+	minColW = 64
+	colGap  = 1
+)
+
+// panelBox is one backend's computed placement: the total (bordered) width and
+// height its box gets, and its 1-based number badge (its position in panels()
+// order).
+type panelBox struct {
+	src   string
+	w, h  int
+	index int
+}
+
+// column is a vertical stack of panels; the layout is one or more columns joined
+// side by side. Boxes in a column share the column's width.
+type column struct {
+	boxes []panelBox
+}
+
+// naturalsOf is the natural (bordered) height each panel wants: content + 2
+// border + 1 header, floored at minStackPanelH.
+func naturalsOf(content []int) []int {
+	n := make([]int, len(content))
+	for i, c := range content {
+		n[i] = max(c+3, minStackPanelH)
+	}
+	return n
+}
+
+// columnCount chooses how many columns to split into. A panel taller than the
+// screen (the system list) will scroll no matter what, so it takes a column of
+// its own; the shorter panels are packed into just enough further columns that
+// each column's content fits the height. The result is capped by maxCols (what
+// the terminal width allows), so a narrow terminal collapses to one column and a
+// short-enough set of backends stays a single readable stack.
+func columnCount(naturals []int, availH, maxCols int) int {
+	tall, shortSum, shortN := 0, 0, 0
+	for _, n := range naturals {
+		if n > availH {
+			tall++
+		} else {
+			shortSum += n
+			shortN++
 		}
 	}
-	if len(heights) > 0 {
-		return heights[0]
+	shortCols := 0
+	if shortSum > availH { // shorts need more than one column to avoid scrolling
+		shortCols = clampInt((shortSum+availH-1)/availH, 1, shortN)
+	} else if shortN > 0 {
+		shortCols = 1
+	}
+	return clampInt(tall+shortCols, 1, maxCols)
+}
+
+// columnLayout packs panels into balanced columns: each panel (in panels()
+// order) drops into the currently-shortest column, so the tall system list lands
+// alone in one column and the small backends stack beside it in the next — using
+// the horizontal space instead of scrolling the big list under a wasted right
+// margin. remeasure, when non-nil, recomputes the content-line counts once the
+// column width is known (apply panels wrap their error text to the column width).
+func (m Model) columnLayout(sources []string, content []int, remeasure func(colW int) []int) []column {
+	availH := m.selectAvailHeight()
+	fullW := m.width
+	if fullW <= 0 {
+		fullW = 80
+	}
+	maxCols := clampInt((fullW+colGap)/(minColW+colGap), 1, max(len(sources), 1))
+	cols := columnCount(naturalsOf(content), availH, maxCols)
+	colW := (fullW - (cols-1)*colGap) / cols
+	if remeasure != nil {
+		content = remeasure(colW)
+	}
+
+	// Greedy balance: place each panel into the shortest column so far.
+	naturals := naturalsOf(content)
+	members := make([][]int, cols)
+	colHeight := make([]int, cols)
+	for i := range sources {
+		best := 0
+		for c := 1; c < cols; c++ {
+			if colHeight[c] < colHeight[best] {
+				best = c
+			}
+		}
+		members[best] = append(members[best], i)
+		colHeight[best] += naturals[i]
+	}
+
+	// Fit each column's panels to the height independently, reusing the 1-D drain
+	// so an over-tall column shrinks its biggest panel (the system list) first.
+	columns := make([]column, cols)
+	for c := range members {
+		idxs := members[c]
+		cont := make([]int, len(idxs))
+		for k, i := range idxs {
+			cont[k] = content[i]
+		}
+		heights := panelLayout(cont, availH)
+		boxes := make([]panelBox, len(idxs))
+		for k, i := range idxs {
+			boxes[k] = panelBox{src: sources[i], w: colW, h: heights[k], index: i + 1}
+		}
+		columns[c] = column{boxes: boxes}
+	}
+	return columns
+}
+
+// selectLayout is the column layout for the Selecting screen.
+func (m Model) selectLayout() []column {
+	return m.columnLayout(m.panels(), m.panelContentLines(), nil)
+}
+
+// applyLayout is the column layout for the Applying screen. A failed backend's
+// content grows to fit its word-wrapped error, measured at the column width so
+// the whole reason stays legible rather than clipped.
+func (m Model) applyLayout() []column {
+	srcs := m.appliedSources()
+	base := make([]int, len(srcs))
+	for i, s := range srcs {
+		base[i] = max(len(m.applying[s]), 1)
+	}
+	return m.columnLayout(srcs, base, func(colW int) []int {
+		errW := max(colW-2-panelGutter, 4)
+		content := make([]int, len(srcs))
+		for i, s := range srcs {
+			content[i] = base[i]
+			if st := m.progress[s]; st != nil && st.failed && st.errText != "" {
+				content[i] = base[i] + len(wrapLines("✗ "+st.errText, errW)) + 1
+			}
+		}
+		return content
+	})
+}
+
+// currentLayout picks the layout for whichever screen is active, so the
+// width/height lookups used while syncing tables match what the view renders.
+func (m Model) currentLayout() []column {
+	switch m.state {
+	case stateApplying, stateDone:
+		return m.applyLayout()
+	default:
+		return m.selectLayout()
+	}
+}
+
+// panelBoxFor returns src's computed box in the current layout.
+func (m Model) panelBoxFor(src string) (panelBox, bool) {
+	for _, col := range m.currentLayout() {
+		for _, box := range col.boxes {
+			if box.src == src {
+				return box, true
+			}
+		}
+	}
+	return panelBox{}, false
+}
+
+// panelWidth is the total (bordered) width src's panel gets in the layout.
+func (m Model) panelWidth(src string) int {
+	if box, ok := m.panelBoxFor(src); ok {
+		return box.w
+	}
+	return max(m.width, 1)
+}
+
+// panelTotalHeight is the bordered height (rows incl. border) of one panel.
+func (m Model) panelTotalHeight(src string) int {
+	if box, ok := m.panelBoxFor(src); ok {
+		return box.h
 	}
 	return m.selectAvailHeight()
 }
@@ -432,17 +613,19 @@ func panelRows(rowCount, contentH int) (rowCap int, showStatus bool) {
 	return contentH, false
 }
 
-// panelInnerW is the inner (content) width of a panel: full terminal width minus
-// the two border columns. Mirrors the innerW computed in renderPanel.
-func (m Model) panelInnerW() int {
-	return max(m.width-2, 8)
+// panelInnerWFor is the inner (content) width of src's panel: its assigned
+// (bordered) width minus the two border columns. Mirrors the innerW computed in
+// renderPanel, but reads the width from the hybrid layout so a tiled (narrow)
+// panel is sized to its column, not the full terminal.
+func (m Model) panelInnerWFor(src string) int {
+	return max(m.panelWidth(src)-2, 8)
 }
 
-// panelContentW is the writable width inside a panel: the inner width less the
-// left gutter. Tables and columns are sized to this; the gutter is added back
+// panelContentWFor is the writable width inside src's panel: the inner width less
+// the left gutter. Tables and columns are sized to this; the gutter is added back
 // when the lines are assembled.
-func (m Model) panelContentW() int {
-	return max(m.panelInnerW()-panelGutter, 4)
+func (m Model) panelContentWFor(src string) int {
+	return max(m.panelInnerWFor(src)-panelGutter, 4)
 }
 
 // panelRowsFor returns how many package rows fit in a panel's content area and
@@ -490,7 +673,7 @@ func (m *Model) syncTable(src string) {
 		return
 	}
 	t := m.tableFor(src)
-	contentW := m.panelContentW()
+	contentW := m.panelContentWFor(src)
 	rowCap, _ := m.panelRowsFor(src)
 
 	t.SetColumns([]table.Column{{Title: "", Width: contentW}})
@@ -508,10 +691,15 @@ func (m *Model) syncTable(src string) {
 	}
 	focused := src == m.focusedSource()
 	cur := t.Cursor()
-	// Size the columns from every backend's rows, not just this panel's, so the
-	// name/version/size columns line up vertically down the whole stack. The
-	// inner width is identical for every full-width panel, so one sizing fits all.
-	nameW, curW, newW, sizeW := panelColumns(m.rows, contentW)
+	// Size the columns so they line up. A full-width (wide) panel sizes from every
+	// backend's rows, since all wide panels share one inner width and stack down
+	// the screen; a tiled (narrow) panel is its own separate box, so it sizes from
+	// just its own rows at its own column width.
+	colRows := m.rows
+	if m.panelWidth(src) < m.width {
+		colRows = m.sourceRows(src)
+	}
+	nameW, curW, newW, sizeW := panelColumns(colRows, contentW)
 	rows := make([]table.Row, len(rs))
 	for i, r := range rs {
 		rows[i] = table.Row{m.renderPanelRow(r, focused && i == cur, nameW, curW, newW, sizeW)}
@@ -533,7 +721,7 @@ func (m *Model) syncAllPanels() {
 // renderPanel draws one backend's box at the given total size. Content lines are
 // each padded to the inner width and counted exactly so the rounded border wraps
 // to (totalW × totalH) precisely, keeping the grid aligned.
-func (m Model) renderPanel(src string, totalW, totalH int, focused bool) string {
+func (m Model) renderPanel(src string, totalW, totalH, index int, focused bool) string {
 	innerW := max(totalW-2, 8)
 	innerH := max(totalH-2, 1)
 	contentW := max(innerW-panelGutter, 4)
@@ -556,7 +744,7 @@ func (m Model) renderPanel(src string, totalW, totalH int, focused bool) string 
 	}
 
 	lines := make([]string, 0, innerH)
-	lines = append(lines, panelHeader(src, right, contentW, m.sourceIcon(src), m.sourceColor(src)))
+	lines = append(lines, panelHeader(index, src, right, contentW, m.sourceIcon(src), m.sourceColor(src)))
 
 	contentH := max(innerH-1, 1)
 	switch {
@@ -650,17 +838,24 @@ func dimColor(hex string) string {
 	return colorful.Hsl(h, s*0.5, l*0.85).Clamped().Hex()
 }
 
-// renderStack lays panels out as a single full-width vertical stack at the given
-// per-panel heights (from panelLayout). render draws one panel at a given size.
-func renderStack(sources []string, totalW int, heights []int, render func(src string, w, h int) string) string {
-	if totalW <= 0 {
-		totalW = 80
+// renderColumns draws the column layout: each column is a vertical stack of
+// panels, and the columns are joined side by side (top-aligned) with a blank gap
+// column between them. A shorter column is padded below by the horizontal join,
+// so the app canvas shows through beneath it.
+func (m Model) renderColumns(cols []column, render func(box panelBox) string) string {
+	gapCol := strings.Repeat(" ", colGap)
+	parts := make([]string, 0, len(cols)*2-1)
+	for ci, col := range cols {
+		if ci > 0 {
+			parts = append(parts, gapCol)
+		}
+		boxes := make([]string, len(col.boxes))
+		for j, b := range col.boxes {
+			boxes[j] = render(b)
+		}
+		parts = append(parts, lipgloss.JoinVertical(lipgloss.Left, boxes...))
 	}
-	boxes := make([]string, len(sources))
-	for i, s := range sources {
-		boxes[i] = render(s, totalW, heights[i])
-	}
-	return lipgloss.JoinVertical(lipgloss.Left, boxes...)
+	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 }
 
 // gradientBox wraps content (exactly innerH lines, each innerW wide) in a
@@ -990,20 +1185,10 @@ func (m Model) viewApplying() string {
 	}
 
 	// Each apply panel is sized to the number of packages it's applying, plus
-	// room for the full (wrapped) error text when that backend has failed — the
-	// whole screen is free for a lone failed install, so don't bury the reason.
-	sel := m.applying
-	errW := max(m.width-2-panelGutter, 4)
-	content := make([]int, len(srcs))
-	for i, s := range srcs {
-		content[i] = max(len(sel[s]), 1)
-		if st := m.progress[s]; st != nil && st.failed && st.errText != "" {
-			content[i] = max(len(sel[s]), 1) + len(wrapLines("✗ "+st.errText, errW)) + 1
-		}
-	}
-	heights := panelLayout(content, m.selectAvailHeight())
-	grid := renderStack(srcs, m.width, heights, func(src string, w, h int) string {
-		return m.renderApplyPanel(src, w, h)
+	// room for the full (wrapped) error text when that backend has failed — a
+	// failed backend is forced full-width (applyLayout) so the reason isn't buried.
+	grid := m.renderColumns(m.applyLayout(), func(box panelBox) string {
+		return m.renderApplyPanel(box.src, box.w, box.h, box.index)
 	})
 
 	var b strings.Builder
@@ -1105,7 +1290,7 @@ func activeRow(pkgs []core.Update, st *srcState) int {
 // pinned to the bottom. When the list is short, the backend's own output tail
 // fills the leftover room. The border animates (gradient) while working, turns
 // green when finished and red when failed.
-func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
+func (m Model) renderApplyPanel(src string, totalW, totalH, index int) string {
 	innerW := max(totalW-2, 8)
 	innerH := max(totalH-2, 1)
 	contentW := max(innerW-panelGutter, 4)
@@ -1128,7 +1313,7 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 	}
 
 	lines := make([]string, 0, innerH)
-	lines = append(lines, panelHeader(src, right, contentW, m.sourceIcon(src), m.sourceColor(src)))
+	lines = append(lines, panelHeader(index, src, right, contentW, m.sourceIcon(src), m.sourceColor(src)))
 	contentH := max(innerH-1, 1)
 
 	body := make([]string, 0, contentH)
@@ -1138,7 +1323,7 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 	// the whole reason is legible instead of clipped to a single bottom line.
 	if st != nil && st.failed && st.errText != "" {
 		barW := applyBarWidth(contentW)
-		nameW, curW, newW, sizeW := m.applyColWidths()
+		nameW, curW, newW, sizeW := m.applyColWidthsFor(src)
 		for i := 0; i < total && len(body) < contentH; i++ {
 			body = append(body, padRight(m.renderApplyRow(i, pkgs[i], st, nameW, curW, newW, sizeW, barW, contentW), contentW))
 		}
@@ -1178,7 +1363,7 @@ func (m Model) renderApplyPanel(src string, totalW, totalH int) string {
 	// keep today's behaviour when there's no room. The column widths are sized
 	// once across every backend's packages so they line up down the whole stack.
 	barW := applyBarWidth(contentW)
-	nameW, curW, newW, sizeW := m.applyColWidths()
+	nameW, curW, newW, sizeW := m.applyColWidthsFor(src)
 	offset := 0
 	if total > listH {
 		offset = clampInt(activeRow(pkgs, st)-listH/2, 0, total-listH)
@@ -1392,23 +1577,26 @@ func applyBarWidth(contentW int) int {
 	return 0
 }
 
-// applyColWidths sizes the apply panels' name / current / new / size columns
-// once across every selected package in the run, so the columns line up
-// vertically down the whole stack instead of each panel choosing its own widths
-// from its own packages. Every full-width panel shares the same content (and so
-// bar) width, so one sizing fits all.
-func (m Model) applyColWidths() (nameW, curW, newW, sizeW int) {
-	contentW := m.panelContentW()
+// applyColWidthsFor sizes src's apply-panel name / current / new / size columns.
+// A full-width (wide) panel sizes across every backend's packages so the columns
+// line up down the stack; a tiled (narrow) panel — its own separate box — sizes
+// from just its own packages at its own column width.
+func (m Model) applyColWidthsFor(src string) (nameW, curW, newW, sizeW int) {
+	contentW := m.panelContentWFor(src)
 	colW := contentW
 	if barW := applyBarWidth(contentW); barW > 0 {
 		colW = contentW - barW - 2
 	}
 	sel := m.selectionByBackend()
-	var all []core.Update
-	for _, s := range m.appliedSources() {
-		all = append(all, sel[s]...)
+	var pkgs []core.Update
+	if m.panelWidth(src) < m.width {
+		pkgs = sel[src]
+	} else {
+		for _, s := range m.appliedSources() {
+			pkgs = append(pkgs, sel[s]...)
+		}
 	}
-	return applyColumns(all, colW)
+	return applyColumns(pkgs, colW)
 }
 
 // applyColumns sizes the name / current / new / size columns for an apply panel,
