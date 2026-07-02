@@ -72,10 +72,6 @@ func helpRow(width int, bindings []key.Binding) string {
 	return b.String()
 }
 
-// bannerFont is the ansifonts bitmap font used for the "spruce" wordmark banner.
-// It's a single constant so the look is trivial to swap.
-const bannerFont = "8bitfortress"
-
 // bannerLines is the "spruce" wordmark, rendered once at startup with a static
 // cyan→pink gradient (the same accents in gradPalette) baked in as ANSI codes.
 // nil when the font can't load, in which case the header falls back to plain text.
@@ -90,13 +86,8 @@ func init() {
 	if err != nil {
 		return // leave bannerLines nil → plain-title fallback
 	}
-	opts := ansifonts.DefaultRenderOptions()
-	opts.TextColor = "#5fd7ff"     // cyan (gradient start)
-	opts.GradientColor = "#ff5fd7" // pink (gradient end)
-	opts.UseGradient = true
-	opts.GradientDirection = ansifonts.LeftRight
-	opts.Alignment = ansifonts.LeftAlign
-	bannerLines = ansifonts.RenderTextWithOptions("spruce", font, opts)
+
+	bannerLines = ansifonts.RenderTextWithOptions("spruce", font, getBannerOpts())
 	for _, ln := range bannerLines {
 		if w := lipgloss.Width(ln); w > bannerWidth {
 			bannerWidth = w
