@@ -415,6 +415,10 @@ func TestSpaceToggle(t *testing.T) {
 // to keep the active item in view, and still fits the terminal.
 func TestApplyPanelListsPackages(t *testing.T) {
 	m := gridModel(map[string]int{"system": 40, "brew": 3})
+	// brew's apply panel now reserves 2 lines for its spacer + progress bar, so it
+	// stands whole while the big system list scrolls; give the tight test terminal
+	// those 2 rows back so the system window still spans done + active + pending.
+	m.height += 2
 	m.applying = m.selectionByBackend()
 	m.state = stateApplying
 

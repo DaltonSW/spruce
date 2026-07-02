@@ -587,9 +587,12 @@ func (m Model) selectLayout() []column {
 	return m.columnLayout(m.panels(), m.panelContentLines(), nil)
 }
 
-// applyLayout is the column layout for the Applying screen. A failed backend's
-// content grows to fit its word-wrapped error, measured at the column width so
-// the whole reason stays legible rather than clipped.
+// applyLayout is the column layout for the Applying screen. A normal panel
+// reserves two extra content lines beyond its package count for the blank
+// spacer + overall progress bar that renderApplyPanel pins to the bottom, so
+// the whole package list fits without being scrolled. A failed backend renders
+// no bar; its content instead grows to fit the word-wrapped error, measured at
+// the column width so the whole reason stays legible rather than clipped.
 func (m Model) applyLayout() []column {
 	srcs := m.appliedSources()
 	base := make([]int, len(srcs))
@@ -600,9 +603,10 @@ func (m Model) applyLayout() []column {
 		errW := max(colW-2-panelGutter, 4)
 		content := make([]int, len(srcs))
 		for i, s := range srcs {
-			content[i] = base[i]
 			if st := m.progress[s]; st != nil && st.failed && st.errText != "" {
 				content[i] = base[i] + len(wrapLines("✗ "+st.errText, errW)) + 1
+			} else {
+				content[i] = base[i] + 2 // spacer + progress-bar lines
 			}
 		}
 		return content
@@ -1490,7 +1494,8 @@ func (m Model) renderApplyPanel(src string, totalW, totalH, index int) string {
 }
 
 // renderApplyRow draws one package line in an apply panel: a status icon, the
-// name, its version bump, and its download size. The active row carries a spinner
+// name, and its version bump (the static size column is dropped during apply —
+// see applyColumns). The active row carries a spinner
 // and a live note (phase + downloaded/size + percent) so you can watch the work
 // move down the list. The whole row is bounded to innerW so the note can't spill
 // past the border.
@@ -1664,9 +1669,13 @@ func (m Model) applyColWidthsFor(src string) (nameW, curW, newW, sizeW int) {
 	return applyColumns(pkgs, colW)
 }
 
-// applyColumns sizes the name / current / new / size columns for an apply panel,
-// reserving room for the leading status icon (1 col + space). The size column is
-// dropped when there isn't room for it alongside a readable name.
+// applyColumns sizes the name / current / new columns for an apply panel,
+// reserving room for the leading status icon (1 col + space). Unlike the
+// selection panels, the apply view drops the static download-size column
+// entirely: the active row's live note (downloaded/size), the per-row bar, and
+// the footer's aggregate already carry that info, so the column would only cost
+// horizontal room. sizeW is always 0 here (kept in the signature so callers and
+// renderApplyRow share panelColumns' shape).
 func applyColumns(pkgs []core.Update, innerW int) (nameW, curW, newW, sizeW int) {
 	const overhead = 1 + 1 + 2 + 3 // icon, space, gap, " → "
 	for _, u := range pkgs {
@@ -1679,29 +1688,15 @@ func applyColumns(pkgs []core.Update, innerW int) (nameW, curW, newW, sizeW int)
 		if w := lipgloss.Width(displayVersion(u.NewVersion)); w > newW {
 			newW = w
 		}
-		if u.SizeBytes > 0 {
-			if w := lipgloss.Width(formatBytes(u.SizeBytes)); w > sizeW {
-				sizeW = w
-			}
-		}
 	}
 	curW = min(curW, 18)
 	newW = min(newW, 18)
-	sizeW = min(sizeW, 9)
 
-	sizeCol := func() int {
-		if sizeW > 0 {
-			return 2 + sizeW // "  24 MB"
-		}
-		return 0
-	}
 	avail := max(innerW-overhead, 6)
 
-	// Same priority as panelColumns: trim size, then versions, then the name.
-	for nameW+curW+newW+sizeCol() > avail {
+	// Same priority as panelColumns: trim versions, then the name.
+	for nameW+curW+newW > avail {
 		switch {
-		case sizeW > 0:
-			sizeW = 0
 		case curW > 6:
 			curW--
 		case newW > 6:

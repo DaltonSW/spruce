@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"go.dalton.dog/spruce/internal/core"
@@ -13,12 +14,16 @@ import (
 // and a scripted, animated apply, and cover every panel state: a big scrolling
 // list, small lists, an up-to-date backend, and an apply that fails partway.
 func DemoBackends() []core.Backend {
+	// applyStep sets each backend's per-package pace: a package downloads in 4
+	// ticks of applyStep and installs in ~2 more. The system list has many small
+	// packages so it stays fast per-item; the smaller managers install heftier
+	// things more slowly, so they don't all finish long before system.
 	return []core.Backend{
-		demoBackend{name: "system", icon: "", color: "#a3be8c", count: 42, checkDelay: 3800 * time.Millisecond},
-		demoBackend{name: "brew", icon: "", color: "#f6b552", count: 6, checkDelay: 1200 * time.Millisecond},
-		demoBackend{name: "flatpak", icon: "", color: "#4a90d9", count: 3, checkDelay: 2300 * time.Millisecond, failApply: true},
-		demoBackend{name: "snap", icon: "", color: "#e95420", count: 0, checkDelay: 800 * time.Millisecond},
-		demoBackend{name: "go", icon: "", color: "#00add8", count: 4, checkDelay: 1600 * time.Millisecond},
+		demoBackend{name: "system", icon: "", color: "#a3be8c", count: 42, checkDelay: 3800 * time.Millisecond, applyStep: 90 * time.Millisecond},
+		demoBackend{name: "brew", icon: "", color: "#f6b552", count: 6, checkDelay: 1200 * time.Millisecond, applyStep: 520 * time.Millisecond},
+		demoBackend{name: "flatpak", icon: "", color: "#4a90d9", count: 3, checkDelay: 2300 * time.Millisecond, applyStep: 640 * time.Millisecond, failApply: true},
+		demoBackend{name: "snap", icon: "", color: "#e95420", count: 0, checkDelay: 800 * time.Millisecond, applyStep: 500 * time.Millisecond},
+		demoBackend{name: "go", icon: "", color: "#00add8", count: 4, checkDelay: 1600 * time.Millisecond, applyStep: 700 * time.Millisecond},
 	}
 }
 
@@ -28,7 +33,8 @@ type demoBackend struct {
 	color      string
 	count      int
 	checkDelay time.Duration
-	failApply  bool // emit an error partway through Apply, to exercise that path
+	applyStep  time.Duration // per-package apply pacing; see DemoBackends
+	failApply  bool          // emit an error partway through Apply, to exercise that path
 }
 
 func (d demoBackend) Name() string  { return d.name }
@@ -86,7 +92,7 @@ func (d demoBackend) Apply(ctx context.Context, plan core.Plan) (<-chan core.Pro
 				return
 			}
 			for f := 0.25; f <= 1.0; f += 0.25 {
-				if !sleep(ctx, 90*time.Millisecond) ||
+				if !sleep(ctx, jitter(d.applyStep)) ||
 					!emit(core.ProgressEvent{Kind: core.EventProgress, Item: u.Name, Fraction: f}) {
 					return
 				}
@@ -94,7 +100,7 @@ func (d demoBackend) Apply(ctx context.Context, plan core.Plan) (<-chan core.Pro
 			if !emit(core.ProgressEvent{Kind: core.EventPhase, Item: u.Name, Phase: "Installing"}) {
 				return
 			}
-			sleep(ctx, 120*time.Millisecond)
+			sleep(ctx, jitter(2*d.applyStep))
 
 			// Fail "partway" only when there's more than one item — a one-off
 			// install of a single package has no midpoint to fail at, and should
@@ -112,6 +118,12 @@ func (d demoBackend) Apply(ctx context.Context, plan core.Plan) (<-chan core.Pro
 	}()
 
 	return events, nil
+}
+
+// jitter scales d by a random factor in [0.65, 1.35] so demo packages don't all
+// install at exactly the same cadence.
+func jitter(d time.Duration) time.Duration {
+	return time.Duration(float64(d) * (0.65 + 0.7*rand.Float64()))
 }
 
 // sleep waits for d or until ctx is cancelled, reporting whether it slept fully.
