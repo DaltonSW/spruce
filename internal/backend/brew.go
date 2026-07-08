@@ -76,16 +76,57 @@ func (Brew) Check(ctx context.Context) ([]core.Update, error) {
 			Pinned:         f.Pinned,
 		})
 	}
-	for _, c := range od.Casks {
-		ups = append(ups, core.Update{
-			Name:           c.Name,
-			CurrentVersion: lastOf(c.InstalledVersions),
-			NewVersion:     c.CurrentVersion,
-			Source:         "brew",
-			Kind:           "cask",
-		})
+	if len(od.Casks) > 0 {
+		// `brew outdated` only reports a cask's bare token, never its tap. If
+		// two taps ship a cask with the same token, `brew upgrade --cask
+		// <token>` can resolve against the wrong one. Tap-qualify using the
+		// installed-cask inventory (no name-resolution ambiguity there);
+		// best-effort — a lookup miss just falls back to the bare token.
+		fullTokens := brewCaskFullTokens(ctx)
+		for _, c := range od.Casks {
+			name := c.Name
+			if full, ok := fullTokens[c.Name]; ok {
+				name = full
+			}
+			ups = append(ups, core.Update{
+				Name:           name,
+				CurrentVersion: lastOf(c.InstalledVersions),
+				NewVersion:     c.CurrentVersion,
+				Source:         "brew",
+				Kind:           "cask",
+			})
+		}
 	}
 	return ups, nil
+}
+
+// brewCaskFullTokens maps every installed cask's bare token to its
+// tap-qualified full token (e.g. "daltonsw/tap/campfire"; core-tap casks map
+// to themselves). Best-effort: a failure yields an empty map, and callers
+// fall back to the bare token.
+func brewCaskFullTokens(ctx context.Context) map[string]string {
+	cmd := exec.CommandContext(ctx, "brew", "info", "--json=v2", "--cask", "--installed")
+	cmd.Env = brewEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+
+	var info struct {
+		Casks []struct {
+			Token     string `json:"token"`
+			FullToken string `json:"full_token"`
+		} `json:"casks"`
+	}
+	if err := json.Unmarshal(out, &info); err != nil {
+		return nil
+	}
+
+	tokens := make(map[string]string, len(info.Casks))
+	for _, c := range info.Casks {
+		tokens[c.Token] = c.FullToken
+	}
+	return tokens
 }
 
 func (b Brew) Plan(ctx context.Context, selected []core.Update) (core.Plan, error) {
