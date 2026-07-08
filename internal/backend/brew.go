@@ -178,34 +178,17 @@ func parseBrewUpgrades(out string) []string {
 func (b Brew) Apply(ctx context.Context, plan core.Plan) (<-chan core.ProgressEvent, error) {
 	events := make(chan core.ProgressEvent, 64)
 
-	var formulae, casks []string
-	for _, u := range plan.Selected {
-		if u.Pinned {
-			continue // never touch pinned formulae
-		}
-		if u.Kind == "cask" {
-			casks = append(casks, u.Name)
-		} else {
-			formulae = append(formulae, u.Name)
-		}
-	}
-
-	base := []string{"brew", "upgrade"}
-	if plan.DryRun {
-		base = append(base, "--dry-run")
-	}
-
 	go func() {
 		defer close(events)
 		if plan.DryRun {
 			events <- core.ProgressEvent{Kind: core.EventLog, Source: "brew",
 				Text: "(dry run — nothing will be upgraded)"}
 		}
-		if len(formulae) > 0 {
-			b.runUpgrade(ctx, events, append(append([]string{}, base...), formulae...))
-		}
-		if len(casks) > 0 {
-			b.runUpgrade(ctx, events, append(append(append([]string{}, base...), "--cask"), casks...))
+		for _, u := range plan.Selected {
+			if u.Pinned {
+				continue // never touch pinned formulae
+			}
+			b.runUpgrade(ctx, events, u, plan.DryRun)
 		}
 		events <- core.ProgressEvent{Kind: core.EventDone, Source: "brew", OK: true}
 	}()
@@ -213,10 +196,24 @@ func (b Brew) Apply(ctx context.Context, plan core.Plan) (<-chan core.ProgressEv
 	return events, nil
 }
 
-// runUpgrade streams one `brew upgrade` invocation, translating output lines
-// into structured events. brew's prefixes ("==> Upgrading", "==> Downloading",
-// "==> Pouring", "🍺") give us enough to drive phases without a real API.
-func (b Brew) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, argv []string) {
+// runUpgrade streams a single `brew upgrade <name>` (or `--cask <name>`),
+// translating output lines into structured events. Looping one package at a
+// time — rather than batching the whole selection into one brew invocation —
+// bounds brew's silent pre-flight (dependency resolution, bottle-manifest
+// fetch) to a single package per step instead of the whole selection, and
+// lets us announce the active item before brew prints anything at all.
+func (b Brew) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, u core.Update, dryRun bool) {
+	argv := []string{"brew", "upgrade"}
+	if dryRun {
+		argv = append(argv, "--dry-run")
+	}
+	if u.Kind == "cask" {
+		argv = append(argv, "--cask")
+	}
+	argv = append(argv, u.Name)
+
+	events <- core.ProgressEvent{Kind: core.EventPhase, Source: "brew", Item: u.Name, Phase: "Upgrading"}
+
 	chunks, done := ptyrun.Stream(ctx, argv, ptyrun.Options{Env: brewEnv(), IdleTimeoutMS: 4000})
 
 	var carry string
@@ -225,17 +222,12 @@ func (b Brew) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, 
 		if line == "" {
 			return
 		}
-		events <- core.ProgressEvent{Kind: core.EventLog, Source: "brew", Text: line}
+		events <- core.ProgressEvent{Kind: core.EventLog, Source: "brew", Item: u.Name, Text: line}
 		switch {
-		case strings.HasPrefix(line, "==> Upgrading ") && !strings.Contains(line, "outdated"):
-			name := firstField(strings.TrimPrefix(line, "==> Upgrading "))
-			events <- core.ProgressEvent{Kind: core.EventPhase, Source: "brew", Item: name, Phase: "Upgrading"}
 		case strings.HasPrefix(line, "==> Downloading"):
-			events <- core.ProgressEvent{Kind: core.EventPhase, Source: "brew", Phase: "Downloading"}
+			events <- core.ProgressEvent{Kind: core.EventPhase, Source: "brew", Item: u.Name, Phase: "Downloading"}
 		case strings.HasPrefix(line, "==> Pouring") || strings.HasPrefix(line, "==> Installing"):
-			events <- core.ProgressEvent{Kind: core.EventPhase, Source: "brew", Phase: "Installing"}
-		case strings.HasPrefix(line, "🍺"):
-			events <- core.ProgressEvent{Kind: core.EventItemDone, Source: "brew", OK: true}
+			events <- core.ProgressEvent{Kind: core.EventPhase, Source: "brew", Item: u.Name, Phase: "Installing"}
 		}
 	}
 
@@ -243,7 +235,7 @@ func (b Brew) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, 
 		if ch.Idle {
 			// Non-interactive flags mean we shouldn't be at a prompt; surface
 			// it rather than hang silently.
-			events <- core.ProgressEvent{Kind: core.EventPrompt, Source: "brew",
+			events <- core.ProgressEvent{Kind: core.EventPrompt, Source: "brew", Item: u.Name,
 				Text: "brew appears to be waiting for input"}
 			continue
 		}
@@ -260,6 +252,8 @@ func (b Brew) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, 
 	emit(carry)
 
 	if err := <-done; err != nil {
-		events <- core.ProgressEvent{Kind: core.EventError, Source: "brew", Text: err.Error()}
+		events <- core.ProgressEvent{Kind: core.EventError, Source: "brew", Item: u.Name, Text: err.Error()}
+		return
 	}
+	events <- core.ProgressEvent{Kind: core.EventItemDone, Source: "brew", Item: u.Name, OK: true}
 }
