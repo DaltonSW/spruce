@@ -24,8 +24,8 @@ builds:
       - -s -w -X go.dalton.dog/spruce/cmd.Version={{.Version}}
 
 homebrew_casks:
-  - name: prism
-    homepage: "https://dalton.dog/prism"
+  - name: spruce
+    homepage: "https://dalton.dog/spruce"
 
     commit_author:
       name: DaltonDogBot
