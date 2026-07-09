@@ -24,6 +24,7 @@ func DemoBackends() []core.Backend {
 		demoBackend{name: "flatpak", icon: "", color: "#4a90d9", count: 3, checkDelay: 2300 * time.Millisecond, applyStep: 640 * time.Millisecond, failApply: true},
 		demoBackend{name: "snap", icon: "", color: "#e95420", count: 0, checkDelay: 800 * time.Millisecond, applyStep: 500 * time.Millisecond},
 		demoBackend{name: "go", icon: "", color: "#00add8", count: 4, checkDelay: 1600 * time.Millisecond, applyStep: 700 * time.Millisecond},
+		demoBackend{name: "npm", icon: "", color: "#cb3837", count: 5, checkDelay: 2000 * time.Millisecond, applyStep: 600 * time.Millisecond},
 	}
 }
 

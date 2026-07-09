@@ -16,6 +16,7 @@ func all() []core.Backend {
 		Flatpak{},
 		Snap{},
 		Go{},
+		Npm{},
 	}
 }
 
