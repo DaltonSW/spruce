@@ -15,6 +15,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -75,8 +76,36 @@ func Stream(ctx context.Context, argv []string, opts Options) (<-chan Chunk, <-c
 		cmd.Dir = opts.Dir
 	}
 
-	ptmx, err := pty.Start(cmd)
+	// Stdin stays off the PTY (pinned to /dev/null below) so TTY-gated CLIs
+	// like Homebrew Cask fail non-interactively instead of prompting. Setctty
+	// defaults to fd 0, so the slave goes through ExtraFiles at fd 3 instead.
+	ptmx, tty, err := pty.Open()
 	if err != nil {
+		close(chunks)
+		done <- err
+		return chunks, done
+	}
+
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		_ = tty.Close()
+		_ = ptmx.Close()
+		close(chunks)
+		done <- err
+		return chunks, done
+	}
+
+	cmd.Stdin = devNull
+	cmd.Stdout = tty
+	cmd.Stderr = tty
+	cmd.ExtraFiles = []*os.File{tty}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 3}
+
+	err = cmd.Start()
+	_ = tty.Close() // the child has its own copy; the parent only needs ptmx
+	if err != nil {
+		_ = devNull.Close()
+		_ = ptmx.Close()
 		close(chunks)
 		done <- err
 		return chunks, done
@@ -104,6 +133,7 @@ func Stream(ctx context.Context, argv []string, opts Options) (<-chan Chunk, <-c
 			_ = ptmx.Close()
 			close(chunks)
 			done <- cmd.Wait()
+			_ = devNull.Close()
 		}()
 
 		var idle <-chan time.Time
