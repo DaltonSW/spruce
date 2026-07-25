@@ -210,6 +210,8 @@ func (m Model) View() tea.View {
 		body = m.viewReviewing()
 	case stateConfirmInstall:
 		body = m.viewConfirmInstall()
+	case stateBrewAsk:
+		body = m.viewBrewAsk()
 	case stateApplying, stateDone:
 		body = m.viewApplying()
 	}
@@ -1106,6 +1108,41 @@ func (m Model) viewConfirmInstall() string {
 	bg := lipgloss.NewLayer(backdrop)
 	fg := lipgloss.NewLayer(modal).X(x).Y(y).Z(1)
 	return lipgloss.NewCompositor(bg, fg).Render()
+}
+
+// viewBrewAsk floats the brew ask-mode consent dialog over the Selecting grid,
+// reusing the review-modal layering.
+func (m Model) viewBrewAsk() string {
+	backdrop := m.viewSelecting()
+	modal := m.brewAskModal()
+
+	x := max((m.width-lipgloss.Width(modal))/2, 0)
+	y := max((lipgloss.Height(backdrop)-lipgloss.Height(modal))/2, 0)
+
+	bg := lipgloss.NewLayer(backdrop)
+	fg := lipgloss.NewLayer(modal).X(x).Y(y).Z(1)
+	return lipgloss.NewCompositor(bg, fg).Render()
+}
+
+// brewAskModal explains that brew wants to confirm each install/upgrade, and
+// offers to answer on the user's behalf — once, or permanently via config.
+func (m Model) brewAskModal() string {
+	body := []string{
+		titleStyle.Render("Homebrew wants to confirm installs"),
+		"",
+		dimStyle.Render("Homebrew normally asks you to confirm each install or"),
+		dimStyle.Render("upgrade. You already reviewed this selection with spruce —"),
+		dimStyle.Render("should spruce answer yes on your behalf?"),
+		"",
+		helpRow(m.width, m.keys.brewAskHelp()),
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left, body...)
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(colAccent)).
+		Padding(1, 3).
+		Render(content)
 }
 
 // installModal is the floating confirmation box for installing just the hovered

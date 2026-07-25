@@ -4,11 +4,13 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/fang"
 	"github.com/spf13/cobra"
 
+	"go.dalton.dog/spruce/internal/config"
 	"go.dalton.dog/spruce/internal/tui"
 	"go.dalton.dog/spruce/internal/version"
 )
@@ -49,6 +51,13 @@ func newRootCmd() *cobra.Command {
 			defer cancel()
 
 			opts.Version = Version
+			if !opts.Demo {
+				cfg, err := config.Load()
+				if err != nil {
+					return fmt.Errorf("Load config: %w", err)
+				}
+				opts.Config = cfg
+			}
 			p := tea.NewProgram(tui.New(ctx, cancel, opts))
 			_, err := p.Run()
 			return err

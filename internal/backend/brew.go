@@ -229,7 +229,7 @@ func (b Brew) Apply(ctx context.Context, plan core.Plan) (<-chan core.ProgressEv
 			if u.Pinned {
 				continue // never touch pinned formulae
 			}
-			b.runUpgrade(ctx, events, u, plan.DryRun)
+			b.runUpgrade(ctx, events, u, plan.DryRun, plan.AutoConfirmPrompts)
 		}
 		events <- core.ProgressEvent{Kind: core.EventDone, Source: "brew", OK: true}
 	}()
@@ -243,7 +243,12 @@ func (b Brew) Apply(ctx context.Context, plan core.Plan) (<-chan core.ProgressEv
 // bounds brew's silent pre-flight (dependency resolution, bottle-manifest
 // fetch) to a single package per step instead of the whole selection, and
 // lets us announce the active item before brew prints anything at all.
-func (b Brew) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, u core.Update, dryRun bool) {
+//
+// autoConfirm reflects the user's consent (secured by the TUI's own gate) to
+// suppress brew's "ask mode" install/upgrade confirmation prompt. Without it,
+// stdin is pinned to /dev/null over the PTY, so an unanswered prompt reads as
+// EOF and brew declines the upgrade rather than hanging.
+func (b Brew) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, u core.Update, dryRun, autoConfirm bool) {
 	argv := []string{"brew", "upgrade"}
 	if dryRun {
 		argv = append(argv, "--dry-run")
@@ -255,7 +260,11 @@ func (b Brew) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, 
 
 	events <- core.ProgressEvent{Kind: core.EventPhase, Source: "brew", Item: u.Name, Phase: "Upgrading"}
 
-	chunks, done := ptyrun.Stream(ctx, argv, ptyrun.Options{Env: brewEnv(), IdleTimeoutMS: 4000})
+	env := brewEnv()
+	if autoConfirm {
+		env = append(env, "HOMEBREW_NO_ASK=1")
+	}
+	chunks, done := ptyrun.Stream(ctx, argv, ptyrun.Options{Env: env, IdleTimeoutMS: 4000})
 
 	var carry string
 	emit := func(line string) {

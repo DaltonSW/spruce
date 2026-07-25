@@ -27,6 +27,7 @@ type keyMap struct {
 	Install    key.Binding
 	Review     key.Binding
 	Apply      key.Binding
+	Always     key.Binding
 	Back       key.Binding
 	Quit       key.Binding
 	Cancel     key.Binding
@@ -67,6 +68,7 @@ func defaultKeys() keyMap {
 		Install:    key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "install one")),
 		Review:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "review")),
 		Apply:      key.NewBinding(key.WithKeys("y", "enter"), key.WithHelp("enter/y", "apply")),
+		Always:     key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "don't ask again")),
 		Back:       key.NewBinding(key.WithKeys("esc", "b", "n"), key.WithHelp("esc", "cancel")),
 		Quit:       key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		Cancel:     key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "cancel")),
@@ -103,6 +105,10 @@ func (k keyMap) reviewingHelp() []key.Binding {
 
 func (k keyMap) confirmInstallHelp() []key.Binding {
 	return []key.Binding{k.Apply, k.DryRun, k.Back, k.Quit}
+}
+
+func (k keyMap) brewAskHelp() []key.Binding {
+	return []key.Binding{k.Apply, k.Always, k.Back, k.Quit}
 }
 
 func (k keyMap) applyingHelp() []key.Binding {

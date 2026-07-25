@@ -12,6 +12,7 @@ import (
 	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
 
+	"go.dalton.dog/spruce/internal/config"
 	"go.dalton.dog/spruce/internal/core"
 )
 
@@ -22,6 +23,7 @@ const (
 	stateSelecting
 	stateReviewing
 	stateConfirmInstall
+	stateBrewAsk
 	stateApplying
 	stateDone
 )
@@ -113,6 +115,16 @@ type Model struct {
 	// (the (i) flow). Independent of the m.selected multi-selection.
 	installTarget *row
 
+	// cfg holds persisted user preferences (currently just brew ask-mode
+	// consent), loaded once at startup.
+	cfg config.Config
+	// brewSkipAsk is session-only consent to suppress brew's ask-mode
+	// confirmation prompts, set by either dialog choice so brew-involving
+	// applies later in the same run don't ask again.
+	brewSkipAsk bool
+	// brewAskReturn is the state stateBrewAsk falls back to on cancel.
+	brewAskReturn state
+
 	// One table per backend owns that panel's cursor + scroll; spruce keeps
 	// selection (m.selected) and styling external. Pointers, so all value-copies
 	// of Model share the same table state.
@@ -162,6 +174,9 @@ type Options struct {
 	// non-"dev", the TUI checks GitHub for a newer release on launch and shows
 	// an "update available" notice below the banner if one exists.
 	Version string
+	// Config carries persisted user preferences loaded at startup; the zero
+	// value (no preferences saved yet) is fine.
+	Config config.Config
 }
 
 // New builds the initial model. ctx is cancelled when the user quits, which
@@ -189,6 +204,7 @@ func New(ctx context.Context, cancel context.CancelFunc, opts Options) Model {
 		demo:      opts.Demo,
 		dryRun:    opts.DryRun,
 		version:   opts.Version,
+		cfg:       opts.Config,
 		ticking:   true, // Init starts the gradient tick loop
 		spinning:  true, // Init starts the spinner tick loop
 	}
@@ -276,6 +292,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) onPlansResolved(msg plansResolvedMsg) (tea.Model, tea.Cmd) {
 	m.plans = msg.plans
 	m.planning = false
+	m.stampBrewConsent()
 	m.applying = map[string][]core.Update{}
 	for name, p := range m.plans {
 		m.applying[name] = p.Selected
@@ -292,16 +309,56 @@ func (m Model) onPlansResolved(msg plansResolvedMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// beginApply transitions into Applying. When plans are still resolving it parks
-// in Applying and lets onPlansResolved launch the run; otherwise it starts
-// immediately from the already-resolved plans.
+// beginApply is the single choke point every "apply" key press runs through
+// (Reviewing and ConfirmInstall both call it). It gates on brew's ask-mode
+// consent before handing off to startApply.
 func (m Model) beginApply() (tea.Model, tea.Cmd) {
+	if m.needsBrewAsk() {
+		m.brewAskReturn = m.state
+		m.state = stateBrewAsk
+		return m, nil
+	}
+	return m.startApply()
+}
+
+// needsBrewAsk reports whether the pending selection includes brew and the
+// user hasn't already consented (this run, or permanently via config) to let
+// spruce suppress brew's ask-mode install/upgrade confirmation prompts.
+func (m Model) needsBrewAsk() bool {
+	if m.demo || m.dryRun || m.autoYes || m.brewSkipAsk || m.cfg.BrewAutoConfirm {
+		return false
+	}
+	if m.installTarget != nil {
+		return m.installTarget.source == "brew"
+	}
+	return len(m.selectionByBackend()["brew"]) > 0
+}
+
+// startApply transitions into Applying. When plans are still resolving it
+// parks in Applying and lets onPlansResolved launch the run; otherwise it
+// starts immediately from the already-resolved plans. Stamps brew's plan with
+// the user's ask-mode consent, if any was given, just before launching.
+func (m Model) startApply() (tea.Model, tea.Cmd) {
 	m.state = stateApplying
+	m.installTarget = nil
+	m.stampBrewConsent()
 	if m.planning {
 		return m, m.ensureTick()
 	}
 	m.seedApplyProgress()
 	return m, tea.Batch(startApplyCmd(m.ctx, m.plans, m.byName, m.dryRun), m.ensureTick())
+}
+
+// stampBrewConsent records onto the resolved brew plan (a no-op if one isn't
+// resolved yet — onPlansResolved calls this again once it is) whether spruce
+// may suppress brew's ask-mode prompts.
+func (m *Model) stampBrewConsent() {
+	p, ok := m.plans["brew"]
+	if !ok {
+		return
+	}
+	p.AutoConfirmPrompts = m.autoYes || m.brewSkipAsk || m.cfg.BrewAutoConfirm
+	m.plans["brew"] = p
 }
 
 // seedApplyProgress marks the apply start time for every backend about to run, so
@@ -333,6 +390,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.keyReviewing(msg)
 	case stateConfirmInstall:
 		return m.keyConfirmInstall(msg)
+	case stateBrewAsk:
+		return m.keyBrewAsk(msg)
 	case stateDone:
 		if key.Matches(msg, m.keys.More) {
 			return m.returnToUpdates()
@@ -586,8 +645,33 @@ func (m Model) keyConfirmInstall(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.DryRun):
 		m.dryRun = !m.dryRun
 	case key.Matches(msg, m.keys.Apply):
-		m.installTarget = nil
+		// installTarget stays set until startApply actually commits to
+		// Applying (it's cleared there) — needsBrewAsk reads it, and if
+		// beginApply routes through stateBrewAsk first, Back needs it intact
+		// to re-render this modal.
 		return m.beginApply()
+	case key.Matches(msg, m.keys.Quit):
+		m.cancel()
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+// keyBrewAsk handles the brew ask-mode consent dialog: apply once, apply and
+// remember the choice for future runs, or cancel back to where Apply was
+// pressed from.
+func (m Model) keyBrewAsk(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Back):
+		m.state = m.brewAskReturn
+	case key.Matches(msg, m.keys.Always):
+		m.brewSkipAsk = true
+		m.cfg.BrewAutoConfirm = true
+		model, cmd := m.startApply()
+		return model, tea.Batch(cmd, saveConfigCmd(m.cfg))
+	case key.Matches(msg, m.keys.Apply):
+		m.brewSkipAsk = true
+		return m.startApply()
 	case key.Matches(msg, m.keys.Quit):
 		m.cancel()
 		return m, tea.Quit

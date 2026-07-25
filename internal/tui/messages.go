@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"go.dalton.dog/spruce/internal/backend"
+	"go.dalton.dog/spruce/internal/config"
 	"go.dalton.dog/spruce/internal/core"
 	"go.dalton.dog/spruce/internal/version"
 )
@@ -110,6 +111,15 @@ func waitForEvent(ch <-chan core.ProgressEvent) tea.Cmd {
 			return applyDoneMsg{}
 		}
 		return applyEventMsg{ev: ev}
+	}
+}
+
+// saveConfigCmd persists cfg in the background. Best-effort: a failed write
+// just means spruce asks again next run, not worth surfacing as an error.
+func saveConfigCmd(cfg config.Config) tea.Cmd {
+	return func() tea.Msg {
+		_ = config.Save(cfg)
+		return nil
 	}
 }
 

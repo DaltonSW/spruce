@@ -35,6 +35,11 @@ type Plan struct {
 	// Anything the user should see before committing: extra deps pulled in,
 	// removals, warnings, etc.
 	Notes []string
+	// AutoConfirmPrompts tells a backend it may suppress interactive
+	// install/upgrade confirmation prompts (e.g. brew's ask-mode) because the
+	// TUI already secured the user's consent via its own gate. Backends
+	// without such a prompt ignore it.
+	AutoConfirmPrompts bool
 }
 
 // EventKind classifies a ProgressEvent so the UI knows which fields matter.
