@@ -171,61 +171,72 @@ func (f Flatpak) Plan(ctx context.Context, selected []core.Update) (core.Plan, e
 func (f Flatpak) Apply(ctx context.Context, plan core.Plan) (<-chan core.ProgressEvent, error) {
 	events := make(chan core.ProgressEvent, 64)
 
-	argv := []string{"flatpak", "update", "-y", "--noninteractive"}
-	if plan.DryRun {
-		// --no-deploy fetches the update but never deploys it: safe & repeatable.
-		argv = append(argv, "--no-deploy")
-	}
-	for _, u := range plan.Selected {
-		argv = append(argv, u.Name)
-	}
-
 	go func() {
 		defer close(events)
 		if plan.DryRun {
 			events <- core.ProgressEvent{Kind: core.EventLog, Source: "flatpak",
 				Text: "(dry run — fetching only, not deploying)"}
 		}
-		chunks, done := ptyrun.Stream(ctx, argv, ptyrun.Options{Env: envBase(), IdleTimeoutMS: 5000})
-
-		var carry string
-		emit := func(line string) {
-			line = strings.TrimRight(line, "\r")
-			if line == "" {
-				return
-			}
-			events <- core.ProgressEvent{Kind: core.EventLog, Source: "flatpak", Text: line}
-			switch {
-			case strings.HasPrefix(line, "Updating") || strings.HasPrefix(line, "Installing"):
-				events <- core.ProgressEvent{Kind: core.EventPhase, Source: "flatpak", Phase: "Updating", Item: firstField(strings.TrimSpace(line[strings.IndexByte(line, ' ')+1:]))}
-			case strings.Contains(line, "Changes complete") || strings.HasPrefix(line, "Updates complete"):
-				events <- core.ProgressEvent{Kind: core.EventItemDone, Source: "flatpak", OK: true}
-			}
-		}
-
-		for ch := range chunks {
-			if ch.Idle {
-				events <- core.ProgressEvent{Kind: core.EventPrompt, Source: "flatpak",
-					Text: "flatpak appears to be waiting for input"}
-				continue
-			}
-			carry += ch.Data
-			for {
-				i := strings.IndexByte(carry, '\n')
-				if i < 0 {
-					break
-				}
-				emit(carry[:i])
-				carry = carry[i+1:]
-			}
-		}
-		emit(carry)
-
-		if err := <-done; err != nil {
-			events <- core.ProgressEvent{Kind: core.EventError, Source: "flatpak", Text: err.Error()}
+		for _, u := range plan.Selected {
+			f.runUpdate(ctx, events, u, plan.DryRun)
 		}
 		events <- core.ProgressEvent{Kind: core.EventDone, Source: "flatpak", OK: true}
 	}()
 
 	return events, nil
+}
+
+// runUpdate streams a single `flatpak update -y --noninteractive <name>`,
+// translating output lines into structured events. Looping one app at a time
+// — rather than batching the whole selection into one flatpak invocation —
+// lets us announce the active item before flatpak prints anything and lets
+// the UI mark each item done as its own process exits, instead of inferring
+// completion from "Changes complete" chatter in a shared, multi-app stream.
+func (f Flatpak) runUpdate(ctx context.Context, events chan<- core.ProgressEvent, u core.Update, dryRun bool) {
+	argv := []string{"flatpak", "update", "-y", "--noninteractive"}
+	if dryRun {
+		// --no-deploy fetches the update but never deploys it: safe & repeatable.
+		argv = append(argv, "--no-deploy")
+	}
+	argv = append(argv, u.Name)
+
+	events <- core.ProgressEvent{Kind: core.EventPhase, Source: "flatpak", Item: u.Name, Phase: "Updating"}
+
+	chunks, done := ptyrun.Stream(ctx, argv, ptyrun.Options{Env: envBase(), IdleTimeoutMS: 5000})
+
+	var carry string
+	emit := func(line string) {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			return
+		}
+		events <- core.ProgressEvent{Kind: core.EventLog, Source: "flatpak", Item: u.Name, Text: line}
+		if strings.HasPrefix(line, "Updating") || strings.HasPrefix(line, "Installing") {
+			events <- core.ProgressEvent{Kind: core.EventPhase, Source: "flatpak", Item: u.Name, Phase: "Updating"}
+		}
+	}
+
+	for ch := range chunks {
+		if ch.Idle {
+			events <- core.ProgressEvent{Kind: core.EventPrompt, Source: "flatpak", Item: u.Name,
+				Text: "flatpak appears to be waiting for input"}
+			continue
+		}
+		carry += ch.Data
+		for {
+			i := strings.IndexByte(carry, '\n')
+			if i < 0 {
+				break
+			}
+			emit(carry[:i])
+			carry = carry[i+1:]
+		}
+	}
+	emit(carry)
+
+	if err := <-done; err != nil {
+		events <- core.ProgressEvent{Kind: core.EventError, Source: "flatpak", Item: u.Name, Text: err.Error()}
+		return
+	}
+	events <- core.ProgressEvent{Kind: core.EventItemDone, Source: "flatpak", Item: u.Name, OK: true}
 }

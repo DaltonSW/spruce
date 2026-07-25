@@ -2,7 +2,7 @@
 
 Spruce up your system! 🌲 Keeping everything up to date shouldn't mean juggling five different package managers and squinting at five different progress spinners.
 
-`spruce` is a pretty TUI front-end over the package-upgrade workflows that already exist on your system. It does **not** reimplement any package manager — each backend drives the real tool (PackageKit/D-Bus, `brew`, `flatpak`, snapd) and streams structured progress back to the UI. One screen, every update.
+`spruce` is a pretty TUI front-end over the package-upgrade workflows that already exist on your system. It does **not** reimplement any package manager — each backend drives the real tool (PackageKit/D-Bus, `brew`, `flatpak`, snapd, `go`, `npm`) and streams structured progress back to the UI. One screen, every update.
 
 ![spruce demo](./assets/demo.gif)
 
@@ -62,18 +62,26 @@ Each is discovered at runtime; only the ones present on the machine appear.
 | **brew** | `brew outdated --json=v2` for the list; `brew upgrade` under a PTY for progress |
 | **flatpak** | per-remote `flatpak remote-ls --updates`; `flatpak update -y` to apply |
 | **snap** | snapd REST API over `/run/snapd.socket`; polls the change for progress |
-| **go** | Packages installed via `go install`; Scans `$GOBIN/$GOPATH` for installed packages |
+| **go** | binaries installed via `go install`; reads each one's build info in `$GOBIN`/`$GOPATH/bin`, resolves `@latest` via the module proxy, upgrades with `go install <pkg>@latest` |
+| **npm** | globally installed CLI packages only (`npm outdated -g --json`); `npm install -g <pkg>@latest` under a PTY to apply |
 
 AppImage is intentionally out of scope (no central registry to query).
 
 *PackageKit is an abstraction over system-level package managers, so (theoretically) this will work with apt, dnf, pacman, zypper, or anything else listed as a supported back-end [here](https://en.wikipedia.org/wiki/PackageKit)
 
+Two notes on the language-manager backends:
+
+- **go** only sees binaries with embedded module info; ones built from local source
+  (`(devel)`) have no upstream version to compare and are skipped. `go install` has
+  no dry-run flag, so `--dry-run` prints the command it *would* run and stops.
+- **npm** is strictly global (`-g`) — project-local dependencies are never touched.
+  If your global prefix is root-owned, the review screen says so up front, since
+  `spruce` won't shell out to `sudo` to work around it.
+
 ### Next Up
 
-- Go
 - pipx
 - gem
-- npm -g
 - ...?
 
 ## Architecture
@@ -84,7 +92,7 @@ internal/
   cli/         single fang/cobra command: root → TUI; -y applies immediately
   core/        the only thing the TUI depends on: Update, Plan, ProgressEvent, Backend
   backend/     one file per manager + registry (runtime discovery, concurrent CheckAll)
-  ptyrun/      PTY streaming helper for CLI-wrapped backends (brew, flatpak)
+  ptyrun/      PTY streaming helper for CLI-wrapped backends (brew, flatpak, go, npm)
   tui/         Bubble Tea v2 model/view: Discovering → Selecting → Reviewing → Applying → Done
 ```
 
