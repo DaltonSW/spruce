@@ -102,7 +102,9 @@ func (n Npm) Plan(ctx context.Context, selected []core.Update) (core.Plan, error
 	plan := core.Plan{Backend: n.Name(), Selected: selected, NeedsRoot: false}
 	if prefix, ok := npmRootOwnedPrefix(ctx); ok {
 		plan.Notes = append(plan.Notes, fmt.Sprintf(
-			"npm's global prefix (%s) is root-owned — upgrades may fail without elevated permissions.", prefix))
+			"npm's global prefix (%s) is root-owned, so spruce will skip these installs rather than "+
+				"use sudo. Fix with `npm config set prefix ~/.npm-global` (and add its bin/ to PATH), "+
+				"or switch to a user-level Node manager like nvm/fnm.", prefix))
 	}
 	return plan, nil
 }
@@ -153,6 +155,21 @@ func (n Npm) Apply(ctx context.Context, plan core.Plan) (<-chan core.ProgressEve
 		if plan.DryRun {
 			events <- core.ProgressEvent{Kind: core.EventLog, Source: "npm",
 				Text: "(dry run — nothing will be installed)"}
+		}
+
+		// A root-owned global prefix means every install below would fail with a
+		// cryptic EACCES; check once and skip the attempt entirely rather than
+		// let each package fail individually. We never use raw sudo (see
+		// CLAUDE.md), so this is unrecoverable without the user reconfiguring npm.
+		if !plan.DryRun {
+			if prefix, ok := npmRootOwnedPrefix(ctx); ok {
+				events <- core.ProgressEvent{Kind: core.EventError, Source: "npm", Text: fmt.Sprintf(
+					"npm's global prefix (%s) is root-owned — skipping, spruce never uses sudo. "+
+						"Fix with `npm config set prefix ~/.npm-global` (add its bin/ to PATH) or "+
+						"switch to a user-level Node manager like nvm/fnm.", prefix)}
+				events <- core.ProgressEvent{Kind: core.EventDone, Source: "npm", OK: false}
+				return
+			}
 		}
 
 		for _, u := range plan.Selected {

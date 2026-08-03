@@ -7,33 +7,34 @@ import "charm.land/bubbles/v2/key"
 // bindings, so the two can't drift apart. Bindings that aren't shown in any footer
 // carry no WithHelp; they exist only for matching.
 type keyMap struct {
-	Up         key.Binding
-	Down       key.Binding
-	PageUp     key.Binding
-	PageDown   key.Binding
-	Home       key.Binding
-	End        key.Binding
-	Left       key.Binding
-	Right      key.Binding
-	Tab        key.Binding
-	ShiftTab   key.Binding
-	Jump       key.Binding
-	Toggle     key.Binding
-	All        key.Binding
-	AllGlobal  key.Binding
-	None       key.Binding
-	NoneGlobal key.Binding
-	DryRun     key.Binding
-	Install    key.Binding
-	Review     key.Binding
-	Apply      key.Binding
-	Always     key.Binding
-	Back       key.Binding
-	Quit       key.Binding
-	Cancel     key.Binding
-	QuitDone   key.Binding
-	More       key.Binding
-	Rescan     key.Binding
+	Up           key.Binding
+	Down         key.Binding
+	PageUp       key.Binding
+	PageDown     key.Binding
+	Home         key.Binding
+	End          key.Binding
+	Left         key.Binding
+	Right        key.Binding
+	Tab          key.Binding
+	ShiftTab     key.Binding
+	Jump         key.Binding
+	Toggle       key.Binding
+	All          key.Binding
+	AllGlobal    key.Binding
+	InstallPanel key.Binding
+	None         key.Binding
+	NoneGlobal   key.Binding
+	DryRun       key.Binding
+	Install      key.Binding
+	Review       key.Binding
+	Apply        key.Binding
+	Always       key.Binding
+	Back         key.Binding
+	Quit         key.Binding
+	Cancel       key.Binding
+	QuitDone     key.Binding
+	More         key.Binding
+	Rescan       key.Binding
 }
 
 // defaultKeys mirrors the bindings (and footer wording) the TUI used when these
@@ -59,9 +60,13 @@ func defaultKeys() keyMap {
 			key.WithKeys("1", "2", "3", "4", "5", "6", "7", "8", "9"),
 			key.WithHelp("1–9", "jump"),
 		),
-		Toggle:     key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "toggle")),
-		All:        key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "all here")),
-		AllGlobal:  key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "all")),
+		Toggle:    key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "toggle")),
+		All:       key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "all here")),
+		AllGlobal: key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "all")),
+		InstallPanel: key.NewBinding(
+			key.WithKeys("ctrl+enter"),
+			key.WithHelp("ctrl+enter", "install all here"),
+		),
 		None:       key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "none here")),
 		NoneGlobal: key.NewBinding(key.WithKeys("N"), key.WithHelp("N", "none")),
 		DryRun:     key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "dry-run")),
@@ -95,7 +100,7 @@ func (k keyMap) selectingHelp() []helpGroup {
 	return []helpGroup{
 		{"Move", []key.Binding{k.Up, k.Right, k.Jump, k.PageUp, k.Home}},
 		{"Select", []key.Binding{k.Toggle, k.All, k.AllGlobal, k.None, k.NoneGlobal}},
-		{"Do", []key.Binding{k.DryRun, k.Install, k.Review, k.Rescan, k.Quit}},
+		{"Do", []key.Binding{k.DryRun, k.Install, k.Review, k.InstallPanel, k.Rescan, k.Quit}},
 	}
 }
 
@@ -112,9 +117,9 @@ func (k keyMap) brewAskHelp() []key.Binding {
 }
 
 func (k keyMap) applyingHelp() []key.Binding {
-	return []key.Binding{k.Cancel}
+	return []key.Binding{k.Up, k.PageUp, k.Home, k.Cancel}
 }
 
 func (k keyMap) doneHelp() []key.Binding {
-	return []key.Binding{k.More, k.QuitDone}
+	return []key.Binding{k.Up, k.PageUp, k.Home, k.More, k.QuitDone}
 }

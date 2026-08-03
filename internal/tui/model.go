@@ -86,6 +86,12 @@ func (st *srcState) appendLog(line string) {
 	}
 }
 
+// logEntry is one line in the cross-backend activity log.
+type logEntry struct {
+	source string
+	text   string
+}
+
 // Model is the whole application state.
 type Model struct {
 	ctx    context.Context
@@ -148,6 +154,15 @@ type Model struct {
 	// backend. The apply view reads this (not m.selected) so the (i) single-package
 	// flow shows only the package it's installing, not the whole default selection.
 	applying map[string][]core.Update
+
+	// globalLog is the chronological, cross-backend activity log shown below
+	// the per-backend panels during Applying/Done: errors, prompts, and raw
+	// tool output (EventError/EventPrompt/EventLog), tagged by source, so a
+	// failure can be understood in context instead of hunting through one
+	// backend's own panel. logScroll is how many lines the view is scrolled up
+	// from the newest entry; 0 means pinned to the tail.
+	globalLog []logEntry
+	logScroll int
 
 	// Flags from the CLI.
 	autoYes bool   // -y: skip the gates and apply the default selection at once
@@ -392,6 +407,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.keyConfirmInstall(msg)
 	case stateBrewAsk:
 		return m.keyBrewAsk(msg)
+	case stateApplying:
+		return m.keyLog(msg)
 	case stateDone:
 		if key.Matches(msg, m.keys.More) {
 			return m.returnToUpdates()
@@ -399,8 +416,47 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if key.Matches(msg, m.keys.QuitDone) {
 			return m, tea.Quit
 		}
+		return m.keyLog(msg)
 	}
 	return m, nil
+}
+
+// keyLog scrolls the cross-backend activity log — the only interactive
+// content the Applying/Done screens have besides Cancel/More/QuitDone.
+// logScroll counts lines scrolled up from the newest entry; Up/PageUp/Home
+// move toward older lines, Down/PageDown/End back toward the tail.
+func (m Model) keyLog(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	hi := m.logScrollMax()
+	page := m.logVisibleHeight()
+	switch {
+	case key.Matches(msg, m.keys.Up):
+		m.logScroll = clampInt(m.logScroll+1, 0, hi)
+	case key.Matches(msg, m.keys.Down):
+		m.logScroll = clampInt(m.logScroll-1, 0, hi)
+	case key.Matches(msg, m.keys.PageUp):
+		m.logScroll = clampInt(m.logScroll+page, 0, hi)
+	case key.Matches(msg, m.keys.PageDown):
+		m.logScroll = clampInt(m.logScroll-page, 0, hi)
+	case key.Matches(msg, m.keys.Home):
+		m.logScroll = hi
+	case key.Matches(msg, m.keys.End):
+		m.logScroll = 0
+	}
+	return m, nil
+}
+
+// logVisibleHeight is logPanelContentHeight (view.go) floored at 0 for scroll
+// math — that method returns -1 when the log panel isn't shown at all (no
+// leftover room below the panel grid), which would otherwise throw off the
+// clamp arithmetic below.
+func (m Model) logVisibleHeight() int {
+	return max(m.logPanelContentHeight(), 0)
+}
+
+// logScrollMax is the furthest logScroll can go: enough to bring the oldest
+// entry to the top of the panel, floored at 0 so a short log can't scroll.
+func (m Model) logScrollMax() int {
+	return max(len(m.globalLog)-m.logVisibleHeight(), 0)
 }
 
 // restartChecks returns from the Done screen to a fresh Selecting list, re-running
@@ -426,6 +482,8 @@ func (m Model) restartChecks() (tea.Model, tea.Cmd) {
 	m.planCache = map[string]core.Plan{}
 	m.applyCh = nil
 	m.focus = 0
+	m.globalLog = nil
+	m.logScroll = 0
 	m.tables = map[string]*table.Model{} // fresh tables: cursor/scroll start at top
 	m.syncAllPanels()
 
@@ -477,6 +535,8 @@ func (m Model) returnToUpdates() (tea.Model, tea.Cmd) {
 	m.planning = false
 	m.applyCh = nil
 	m.installTarget = nil
+	m.globalLog = nil
+	m.logScroll = 0
 
 	// Fresh tables so cursors can't dangle past the now-shorter row slices.
 	m.tables = map[string]*table.Model{}
@@ -543,6 +603,15 @@ func (m Model) keySelecting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.DryRun):
 		m.dryRun = !m.dryRun
 	case key.Matches(msg, m.keys.Review):
+		if m.anySelected() {
+			m.state = stateReviewing
+			return m.startPlanning(m.selectionByBackend())
+		}
+	case key.Matches(msg, m.keys.InstallPanel):
+		// Equivalent to N (clear everything) then a (select all in the
+		// focused panel) then Enter (review) in one keystroke.
+		m.setAll(false)
+		m.setAllInSource(m.focusedSource(), true)
 		if m.anySelected() {
 			m.state = stateReviewing
 			return m.startPlanning(m.selectionByBackend())
@@ -859,12 +928,14 @@ func (m *Model) applyEvent(ev core.ProgressEvent) {
 		st.failed = true
 		st.errText = ev.Text
 		st.appendLog("✗ " + ev.Text)
+		m.appendGlobalLog(ev.Source, "✗ "+ev.Text)
 	case core.EventStatus:
 		// Transaction-wide phase label; deliberately touches nothing else so it
 		// can't disturb per-package item/progress state.
 		st.status = ev.Phase
 	case core.EventPrompt:
 		st.appendLog("⏸ " + ev.Text)
+		m.appendGlobalLog(ev.Source, "⏸ "+ev.Text)
 	case core.EventDone:
 		st.finished = true
 		st.phase = "Done"
@@ -873,5 +944,25 @@ func (m *Model) applyEvent(ev core.ProgressEvent) {
 		}
 	case core.EventLog:
 		st.appendLog(ev.Text)
+		if ev.Text != "" {
+			m.appendGlobalLog(ev.Source, ev.Text)
+		}
+	}
+}
+
+// appendGlobalLog records one line in the cross-backend activity log, keeping
+// a bounded tail (larger than a single backend's, since it aggregates every
+// backend's errors/prompts/raw output). If the user has scrolled up
+// (logScroll > 0), the offset grows by one so the lines they're looking at
+// stay put instead of being yanked toward the new tail — the same feel as
+// `less +F` once you scroll away from the end.
+func (m *Model) appendGlobalLog(source, text string) {
+	const max = 1000
+	m.globalLog = append(m.globalLog, logEntry{source: source, text: text})
+	if len(m.globalLog) > max {
+		m.globalLog = m.globalLog[len(m.globalLog)-max:]
+	}
+	if m.logScroll > 0 {
+		m.logScroll++
 	}
 }

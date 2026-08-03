@@ -537,8 +537,10 @@ func columnCount(naturals []int, availH, maxCols int) int {
 // the horizontal space instead of scrolling the big list under a wasted right
 // margin. remeasure, when non-nil, recomputes the content-line counts once the
 // column width is known (apply panels wrap their error text to the column width).
-func (m Model) columnLayout(sources []string, content []int, remeasure func(colW int) []int) []column {
-	availH := m.selectAvailHeight()
+// availH is the vertical space the panels may use; callers reserve whatever
+// else the screen needs (status line, footer, the Applying log band) before
+// passing it in.
+func (m Model) columnLayout(sources []string, content []int, availH int, remeasure func(colW int) []int) []column {
 	fullW := m.width
 	if fullW <= 0 {
 		fullW = 80
@@ -586,7 +588,7 @@ func (m Model) columnLayout(sources []string, content []int, remeasure func(colW
 
 // selectLayout is the column layout for the Selecting screen.
 func (m Model) selectLayout() []column {
-	return m.columnLayout(m.panels(), m.panelContentLines(), nil)
+	return m.columnLayout(m.panels(), m.panelContentLines(), m.selectAvailHeight(), nil)
 }
 
 // applyLayout is the column layout for the Applying screen. A normal panel
@@ -594,14 +596,18 @@ func (m Model) selectLayout() []column {
 // spacer + overall progress bar that renderApplyPanel pins to the bottom, so
 // the whole package list fits without being scrolled. A failed backend renders
 // no bar; its content instead grows to fit the word-wrapped error, measured at
-// the column width so the whole reason stays legible rather than clipped.
+// the column width so the whole reason stays legible rather than clipped. This
+// always gets the full available height, exactly as it did before the
+// activity log band existed — the log (below it, logPanelContentHeight) only
+// ever uses genuine leftover space, never space taken from the grid, so a
+// failed backend's full error is never squeezed to make room for the log.
 func (m Model) applyLayout() []column {
 	srcs := m.appliedSources()
 	base := make([]int, len(srcs))
 	for i, s := range srcs {
 		base[i] = max(len(m.applying[s]), 1)
 	}
-	return m.columnLayout(srcs, base, func(colW int) []int {
+	return m.columnLayout(srcs, base, m.selectAvailHeight(), func(colW int) []int {
 		errW := max(colW-2-panelGutter, 4)
 		content := make([]int, len(srcs))
 		for i, s := range srcs {
@@ -613,6 +619,42 @@ func (m Model) applyLayout() []column {
 		}
 		return content
 	})
+}
+
+// columnsHeight is the vertical space a column layout actually occupies: the
+// tallest column, since renderColumns joins columns side by side, top-aligned.
+func columnsHeight(cols []column) int {
+	h := 0
+	for _, c := range cols {
+		s := 0
+		for _, b := range c.boxes {
+			s += b.h
+		}
+		if s > h {
+			h = s
+		}
+	}
+	return h
+}
+
+// logPanelContentHeight is how many log lines are visible at once: whatever's
+// left below the panel grid (never space taken from it — applyLayout always
+// gets the full available height), unbounded above so a small backend with
+// few packages lets the log claim the whole rest of the terminal instead of
+// idling behind a fixed-height band while the log itself scrolls. Returns -1
+// when there isn't even room for an empty bordered box (3 lines: 2 border + 1
+// header) — the panel grid, on a big enough list, can already fill the whole
+// screen on its own, and the log shouldn't force the status line and footer
+// off screen to insist on appearing anyway. Shared by the renderer (which
+// hides the panel on -1) and the scroll-key handler (keyLog/logScrollMax in
+// model.go) so scrolling never outruns what's drawn.
+func (m Model) logPanelContentHeight() int {
+	used := columnsHeight(m.applyLayout())
+	leftover := m.selectAvailHeight() - used
+	if leftover < 3 {
+		return -1
+	}
+	return leftover - 3
 }
 
 // currentLayout picks the layout for whichever screen is active, so the
@@ -1192,12 +1234,23 @@ func (m Model) planLines() []string {
 	if len(notes) == 0 {
 		return nil
 	}
+	// Notes (e.g. npm's root-owned-prefix warning) can run much longer than the
+	// rest of the modal's content, which is normally under ~40 cols of package
+	// rows. Without a cap the modal box grows to fit the longest note verbatim
+	// and can push past the terminal edge, so wrap to a fixed reading width
+	// (still shrinking further on a narrow terminal).
+	maxW := min(modalNoteWidth, max(m.width-8, 20))
 	out := []string{""}
 	for _, n := range notes {
-		out = append(out, dimStyle.Render(n))
+		for _, line := range wrapLines(n, maxW) {
+			out = append(out, pinStyle.Render(line))
+		}
 	}
 	return out
 }
+
+// modalNoteWidth is the wrap width for review/install modal Notes.
+const modalNoteWidth = 60
 
 // reviewModal is the floating confirmation box: one line per backend with its
 // count, a total, and the confirm/cancel hint.
@@ -1299,6 +1352,9 @@ func (m Model) viewApplying() string {
 
 	var b strings.Builder
 	b.WriteString(grid + "\n")
+	if h := m.logPanelContentHeight(); h >= 0 {
+		b.WriteString(m.renderGlobalLogPanel(m.width, h+3) + "\n")
+	}
 
 	done, total := 0, len(srcs)
 	for _, s := range srcs {
@@ -1528,6 +1584,45 @@ func (m Model) renderApplyPanel(src string, totalW, totalH, index int) string {
 	default:
 		return gradientBox(lines, innerW, innerH, float64(m.tick)*0.03)
 	}
+}
+
+// renderGlobalLogPanel draws the cross-backend activity log band below the
+// per-backend panel grid: a chronological feed of every EventError/
+// EventPrompt/EventLog across all backends, tagged by source, so a failure
+// can be understood in the context of what its backend just printed instead
+// of hunting through that one backend's own (per-panel) output tail. Scrolls
+// via keyLog/logScroll (model.go); the header's right-hand note shows how far
+// back the view has scrolled.
+func (m Model) renderGlobalLogPanel(totalW, totalH int) string {
+	innerW := max(totalW-2, 8)
+	innerH := max(totalH-2, 1)
+	contentW := max(innerW-panelGutter, 4)
+	contentH := max(innerH-1, 1)
+
+	right := ""
+	if m.logScroll > 0 {
+		right = fmt.Sprintf(" ↑ %d", m.logScroll)
+	}
+	lines := make([]string, 0, innerH)
+	lines = append(lines, panelHeader(0, "Activity Log", right, contentW, "", ""))
+
+	end := clampInt(len(m.globalLog)-m.logScroll, 0, len(m.globalLog))
+	start := max(end-contentH, 0)
+	body := make([]string, 0, contentH)
+	for _, e := range m.globalLog[start:end] {
+		label := m.sourceLabel(e.source)
+		textW := max(contentW-lipgloss.Width(label)-1, 1)
+		line := label + " " + dimStyle.Render(truncate(stripCR(e.text), textW))
+		body = append(body, padRight(line, contentW))
+	}
+	for len(body) < contentH {
+		body = append(body, padRight("", contentW))
+	}
+	lines = append(lines, body...)
+	for i := range lines {
+		lines[i] = indent(lines[i])
+	}
+	return solidBoxColor(lines, colHelp)
 }
 
 // renderApplyRow draws one package line in an apply panel: a status icon, the
