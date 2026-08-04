@@ -37,11 +37,11 @@ func TestShouldCheck(t *testing.T) {
 	}{
 		{"v1.2.3", true},
 		{"1.0.0", true},
-		{"dev", false},
+		{"dev", true},
 		{"", false},
 		{"  ", false},
-		{"v1.2.3-abc1234-dev", false},
-		{"abc1234-dev", false},
+		{"v1.2.3-abc1234-dev", true},
+		{"abc1234-dev", true},
 	}
 	for _, tc := range cases {
 		if got := shouldCheck(tc.current); got != tc.want {

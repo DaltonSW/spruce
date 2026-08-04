@@ -1,11 +1,7 @@
 // Package version checks whether a newer spruce release is available on
-// GitHub. It is a read-only network lookup against the public releases API
-// (https://api.github.com/repos/DaltonSW/spruce/releases/latest); the result
-// is surfaced in the TUI header as a one-line "update available" notice.
-//
-// The check never blocks the UI: the caller runs it in a Bubble Tea command,
-// and any failure (offline, rate-limited, unparseable response) is swallowed
-// so the app behaves exactly as before when no result can be obtained.
+// GitHub, surfaced in the TUI header as a one-line "update available" notice.
+// The caller runs it as a Bubble Tea command; any failure (offline,
+// rate-limited, unparseable) is swallowed rather than shown.
 package version
 
 import (
@@ -14,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os/exec"
+	"runtime/debug"
 	"strings"
 	"time"
 )
@@ -38,22 +35,72 @@ type Result struct {
 	URL       string
 }
 
-// ResolveDev builds a descriptive version string for a local ("dev") build by
-// querying the git working tree: the most recent tag, the short commit hash,
-// and a "-dev" suffix. The result is e.g. "v1.2.3-abc1234-dev". When there are
-// no tags yet it falls back to just the commit hash: "abc1234-dev".
-//
-// If git is unavailable or the directory isn't a repo, it returns "dev" so the
-// app still works — just without the richer version label. It never errors;
-// callers can use the result unconditionally as the version string.
+// ResolveDev builds a descriptive version string for a local ("dev") build,
+// i.e. one where the ldflags-stamped cmd.Version was left at "dev". It
+// prefers the version info Go embeds in the binary at build time (works
+// regardless of the process's cwd, so it's correct for `go install`d
+// binaries run from anywhere) and only falls back to shelling out to git
+// against the current working directory — which only produces a real answer
+// when run from inside the source checkout — as a last resort. Never errors.
 func ResolveDev() string {
+	if v := fromBuildInfo(); v != "" {
+		return v
+	}
+
 	tag := gitTag()
 	commit := gitShortCommit()
-	if tag == "" && commit == "" {
+	parts := make([]string, 0, 3)
+	if tag != "" {
+		parts = append(parts, tag)
+	}
+	if commit != "" {
+		parts = append(parts, commit)
+	}
+	if len(parts) == 0 {
 		return "dev"
 	}
-	parts := []string{tag, commit, "dev"}
+	parts = append(parts, "dev")
 	return strings.Join(parts, "-")
+}
+
+// fromBuildInfo derives a version string from the Go module/VCS info that
+// the toolchain embeds in the binary at build time. When installed via
+// `go install module@version`, Main.Version is the resolved tag or
+// pseudo-version (e.g. "v1.3.0") and is returned as-is. When built locally
+// without a version query (`go build .`, `go install .` from a checkout),
+// Main.Version is the literal "(devel)"; in that case the embedded
+// vcs.revision/vcs.modified settings (stamped from the local git repo at
+// build time, not read at runtime) are used to build a "<rev>-dev" string.
+// Returns "" if build info has nothing usable.
+func fromBuildInfo() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	if bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+
+	var revision string
+	var modified bool
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			revision = s.Value
+		case "vcs.modified":
+			modified = s.Value == "true"
+		}
+	}
+	if revision == "" {
+		return ""
+	}
+	if len(revision) > 12 {
+		revision = revision[:12]
+	}
+	if modified {
+		return revision + "-dev-dirty"
+	}
+	return revision + "-dev"
 }
 
 // gitTag returns the most recent tag reachable from HEAD (e.g. "v1.2.3"), or
@@ -77,15 +124,9 @@ func gitShortCommit() string {
 }
 
 // Check fetches the latest spruce release from GitHub and reports whether it
-// is newer than current. current is the build-time version stamp ("dev" for a
-// local build, or a goreleaser tag like "v1.2.3"). A "dev" build is always
-// considered up-to-date so the notice never fires for developers running from
-// source.
-//
-// The HTTP request is bounded by ctx; a 10s timeout is applied as a safety net
-// so a stalled connection can't hold the command open indefinitely. Any error
-// returns a zero Result (Available: false) rather than propagating, so a
-// failed check is invisible to the user.
+// is newer than current (the build-time version stamp, "dev" for a local
+// build). A "dev" build always counts as up-to-date. The request is bounded
+// by a 10s timeout; any error returns a zero Result rather than propagating.
 func Check(ctx context.Context, current string) Result {
 	if !shouldCheck(current) {
 		return Result{}
@@ -129,17 +170,14 @@ func Check(ctx context.Context, current string) Result {
 	return Result{Available: true, Latest: rel.TagName, URL: rel.HTMLURL}
 }
 
-// shouldCheck reports whether a version check is worth performing. "dev" (the
-// default for a local `go run`/`go build` with no ldflags), the resolved dev
-// form ("v1.2.3-abc1234-dev"), and empty strings all skip the check — there's
-// no meaningful comparison to make against a release tag, and developers don't
-// need a "new release" banner on every run.
+// shouldCheck reports whether a version check is worth performing. An empty
+// string is the only thing that skips it — there's nothing to compare
+// against. Even a "dev"-flavored current version (e.g. "abc1234-dev") is
+// still worth diffing against the latest release: isNewer treats its
+// non-numeric leading segment as lower than any numbered release, so it
+// correctly surfaces "update available" instead of being silently skipped.
 func shouldCheck(current string) bool {
-	current = strings.TrimSpace(current)
-	if current == "" || current == "dev" {
-		return false
-	}
-	return !strings.HasSuffix(current, "-dev")
+	return strings.TrimSpace(current) != ""
 }
 
 // segment is one dotted piece of a version string, split into its leading
@@ -149,12 +187,10 @@ type segment struct {
 	rest string
 }
 
-// isNewer reports whether latest is a higher version than current, comparing
-// them as trimmed version tags (both may carry a leading "v"). The comparison
-// walks the dotted numeric segments left to right; the first segment that
-// differs decides. Tags that don't parse as numbers fall back to a plain
-// string comparison on the remainder so a non-numeric tag never causes a
-// false "update available".
+// isNewer reports whether latest is a higher version than current (both may
+// carry a leading "v"), comparing dotted numeric segments left to right; the
+// first that differs decides. Non-numeric segments fall back to a plain
+// string comparison.
 func isNewer(current, latest string) bool {
 	current = strings.TrimPrefix(strings.TrimSpace(current), "v")
 	latest = strings.TrimPrefix(strings.TrimSpace(latest), "v")

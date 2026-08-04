@@ -151,16 +151,13 @@ type Model struct {
 	applyCh  <-chan core.ProgressEvent
 	progress map[string]*srcState
 	// applying is the exact selection handed to this apply run, grouped by
-	// backend. The apply view reads this (not m.selected) so the (i) single-package
-	// flow shows only the package it's installing, not the whole default selection.
+	// backend — read by the apply view instead of m.selected so a
+	// single-package install shows only that package.
 	applying map[string][]core.Update
 
 	// globalLog is the chronological, cross-backend activity log shown below
-	// the per-backend panels during Applying/Done: errors, prompts, and raw
-	// tool output (EventError/EventPrompt/EventLog), tagged by source, so a
-	// failure can be understood in context instead of hunting through one
-	// backend's own panel. logScroll is how many lines the view is scrolled up
-	// from the newest entry; 0 means pinned to the tail.
+	// the per-backend panels during Applying/Done. logScroll is how many lines
+	// it's scrolled up from the newest entry; 0 means pinned to the tail.
 	globalLog []logEntry
 	logScroll int
 
@@ -353,7 +350,11 @@ func (m Model) needsBrewAsk() bool {
 // parks in Applying and lets onPlansResolved launch the run; otherwise it
 // starts immediately from the already-resolved plans. Stamps brew's plan with
 // the user's ask-mode consent, if any was given, just before launching.
+//
+// m.applying is seeded here (not left for onPlansResolved) so the screen
+// doesn't briefly show "Nothing to apply." while plans are still resolving.
 func (m Model) startApply() (tea.Model, tea.Cmd) {
+	m.applying = m.pendingApplySelection()
 	m.state = stateApplying
 	m.installTarget = nil
 	m.stampBrewConsent()
@@ -362,6 +363,19 @@ func (m Model) startApply() (tea.Model, tea.Cmd) {
 	}
 	m.seedApplyProgress()
 	return m, tea.Batch(startApplyCmd(m.ctx, m.plans, m.byName, m.dryRun), m.ensureTick())
+}
+
+// pendingApplySelection mirrors the selection startPlanning was called with
+// for the current screen (Reviewing's full selection, or ConfirmInstall's
+// single package with Pinned cleared) so it can be reused once Apply is
+// pressed, before the resolved Plan is back.
+func (m Model) pendingApplySelection() map[string][]core.Update {
+	if m.installTarget != nil {
+		u := m.installTarget.update
+		u.Pinned = false
+		return map[string][]core.Update{m.installTarget.source: {u}}
+	}
+	return m.selectionByBackend()
 }
 
 // stampBrewConsent records onto the resolved brew plan (a no-op if one isn't
@@ -495,13 +509,11 @@ func (m Model) restartChecks() (tea.Model, tea.Cmd) {
 }
 
 // returnToUpdates is the fast return from the Done screen: it reuses the cached
-// rows (still in the model — apply never clears them) instead of re-running Check
-// on every backend, which on a real system stalls for seconds. It prunes only the
-// packages a backend applied cleanly; a backend that failed keeps its items so the
+// rows instead of re-running Check on every backend. It prunes only the
+// packages a backend applied cleanly; a failed backend keeps its items so the
 // user can retry. Genuinely-fresh data is one Rescan (ctrl+r) away.
 func (m Model) returnToUpdates() (tea.Model, tea.Cmd) {
-	// Collect the IDs successfully applied, from backends that finished without
-	// failing. Failed/unfinished backends are skipped so their rows survive.
+	// Only backends that finished without failing count as "applied".
 	remove := map[string]bool{}
 	for name, ups := range m.applying {
 		st := m.progress[name]
@@ -951,11 +963,8 @@ func (m *Model) applyEvent(ev core.ProgressEvent) {
 }
 
 // appendGlobalLog records one line in the cross-backend activity log, keeping
-// a bounded tail (larger than a single backend's, since it aggregates every
-// backend's errors/prompts/raw output). If the user has scrolled up
-// (logScroll > 0), the offset grows by one so the lines they're looking at
-// stay put instead of being yanked toward the new tail — the same feel as
-// `less +F` once you scroll away from the end.
+// a bounded tail. If the user has scrolled up, the offset grows by one so the
+// lines they're looking at stay put instead of jumping to the new tail.
 func (m *Model) appendGlobalLog(source, text string) {
 	const max = 1000
 	m.globalLog = append(m.globalLog, logEntry{source: source, text: text})
