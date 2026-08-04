@@ -17,6 +17,8 @@ func all() []core.Backend {
 		Snap{},
 		Go{},
 		Npm{},
+		Pipx{},
+		Uv{},
 	}
 }
 

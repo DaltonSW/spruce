@@ -25,6 +25,8 @@ func DemoBackends() []core.Backend {
 		demoBackend{name: "snap", icon: "", color: "#e95420", count: 0, checkDelay: 800 * time.Millisecond, applyStep: 500 * time.Millisecond},
 		demoBackend{name: "go", icon: "", color: "#00add8", count: 4, checkDelay: 1600 * time.Millisecond, applyStep: 700 * time.Millisecond},
 		demoBackend{name: "npm", icon: "", color: "#cb3837", count: 5, checkDelay: 2000 * time.Millisecond, applyStep: 600 * time.Millisecond},
+		demoBackend{name: "pipx", icon: "", color: "#ffd43b", count: 3, checkDelay: 1400 * time.Millisecond, applyStep: 550 * time.Millisecond},
+		demoBackend{name: "uv", icon: "", color: "#de5fe9", count: 2, checkDelay: 1000 * time.Millisecond, applyStep: 480 * time.Millisecond},
 	}
 }
 
