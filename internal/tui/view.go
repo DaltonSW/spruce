@@ -336,6 +336,14 @@ func (m Model) selectAvailHeight() int {
 // and one content row.
 const minStackPanelH = 4
 
+// minApplyPanelH is the floor an Applying-screen panel can shrink to: border
+// (2) + header (1) + spacer (1) + progress bar (1) + one package row (1).
+// Taller than minStackPanelH so squeezing a panel for the activity log below
+// (see applyGrid) never drops below renderApplyPanel's contentH>=3 threshold
+// for drawing the overall progress bar — losing that would hide the one
+// piece of apply-progress info (ETA, rate) the log itself doesn't carry.
+const minApplyPanelH = 6
+
 // panelGutter is the blank left margin inside every panel, so the header and rows
 // don't hug the border. Content is sized to innerW-panelGutter and then prefixed
 // with this many spaces, keeping each line exactly innerW wide.
@@ -419,14 +427,15 @@ func panelHeader(index int, src, right string, contentW int, icon, color string)
 // sized to its content so a backend with a single update doesn't sprawl. When
 // heights overflow availH, the tallest panel (the system list) drains to its
 // floor first, so it shrinks and scrolls while smaller panels stay whole.
-func panelLayout(content []int, availH int) []int {
+// floor is the least a panel may shrink to — see minStackPanelH/minApplyPanelH.
+func panelLayout(content []int, availH, floor int) []int {
 	heights := make([]int, len(content))
 	naturals := make([]int, len(content))
 	floors := make([]int, len(content))
 	for i, c := range content {
-		naturals[i] = max(c+3, minStackPanelH) // 2 border + 1 header + content
+		naturals[i] = max(c+3, floor) // 2 border + 1 header + content
 		heights[i] = naturals[i]
-		floors[i] = minStackPanelH
+		floors[i] = floor
 	}
 	return shrinkToFit(heights, naturals, floors, availH)
 }
@@ -487,11 +496,11 @@ type column struct {
 }
 
 // naturalsOf is the natural (bordered) height each panel wants: content + 2
-// border + 1 header, floored at minStackPanelH.
-func naturalsOf(content []int) []int {
+// border + 1 header, floored at floor.
+func naturalsOf(content []int, floor int) []int {
 	n := make([]int, len(content))
 	for i, c := range content {
-		n[i] = max(c+3, minStackPanelH)
+		n[i] = max(c+3, floor)
 	}
 	return n
 }
@@ -523,22 +532,28 @@ func columnCount(naturals []int, availH, maxCols int) int {
 // order) drops into the currently-shortest column, so the tall system list
 // lands alone in one column and small backends stack beside it. remeasure,
 // when non-nil, recomputes content-line counts once the column width is known
-// (apply panels wrap error text to it). availH is the vertical space the
-// panels may use; callers reserve whatever else the screen needs first.
-func (m Model) columnLayout(sources []string, content []int, availH int, remeasure func(colW int) []int) []column {
+// (apply panels wrap error text to it). packAvailH decides the column count
+// (and so each column's width) exactly as if the grid owned the whole
+// terminal; fitAvailH is the (possibly smaller) vertical budget each column's
+// panels actually shrink to fit, down to floor. Callers that need to hold
+// back a band below the grid — the Applying screen's activity log — pass a
+// smaller fitAvailH so the squeeze lands on panel height (drain-to-floor,
+// same as any overflow) rather than forcing extra, narrower columns. Both
+// avails are equal for callers with nothing else to reserve.
+func (m Model) columnLayout(sources []string, content []int, packAvailH, fitAvailH, floor int, remeasure func(colW int) []int) []column {
 	fullW := m.width
 	if fullW <= 0 {
 		fullW = 80
 	}
 	maxCols := clampInt((fullW+colGap)/(minColW+colGap), 1, max(len(sources), 1))
-	cols := columnCount(naturalsOf(content), availH, maxCols)
+	cols := columnCount(naturalsOf(content, floor), packAvailH, maxCols)
 	colW := (fullW - (cols-1)*colGap) / cols
 	if remeasure != nil {
 		content = remeasure(colW)
 	}
 
 	// Greedy balance: place each panel into the shortest column so far.
-	naturals := naturalsOf(content)
+	naturals := naturalsOf(content, floor)
 	members := make([][]int, cols)
 	colHeight := make([]int, cols)
 	for i := range sources {
@@ -561,7 +576,7 @@ func (m Model) columnLayout(sources []string, content []int, availH int, remeasu
 		for k, i := range idxs {
 			cont[k] = content[i]
 		}
-		heights := panelLayout(cont, availH)
+		heights := panelLayout(cont, fitAvailH, floor)
 		boxes := make([]panelBox, len(idxs))
 		for k, i := range idxs {
 			boxes[k] = panelBox{src: sources[i], w: colW, h: heights[k], index: i + 1}
@@ -573,22 +588,31 @@ func (m Model) columnLayout(sources []string, content []int, availH int, remeasu
 
 // selectLayout is the column layout for the Selecting screen.
 func (m Model) selectLayout() []column {
-	return m.columnLayout(m.panels(), m.panelContentLines(), m.selectAvailHeight(), nil)
+	avail := m.selectAvailHeight()
+	return m.columnLayout(m.panels(), m.panelContentLines(), avail, avail, minStackPanelH, nil)
 }
 
-// applyLayout is the column layout for the Applying screen. A normal panel
-// reserves two extra content lines for the spacer + overall progress bar that
-// renderApplyPanel pins to the bottom. A failed backend renders no bar;
-// instead its content grows to fit the word-wrapped error at the column
-// width. This always gets the full available height — the activity log below
-// it only ever claims genuine leftover space, never space taken from the grid.
+// applyLayout is the column layout for the Applying screen: whichever of
+// applyGrid's two candidate fit-heights it settled on, so the rendered grid
+// always matches the height logPanelContentHeight computed the log band
+// against. A normal panel reserves two extra content lines for the spacer +
+// overall progress bar that renderApplyPanel pins to the bottom. A failed
+// backend renders no bar; instead its content grows to fit the word-wrapped
+// error at the column width.
 func (m Model) applyLayout() []column {
+	_, cols, _ := m.applyGrid()
+	return cols
+}
+
+// applyLayoutFit is applyLayout's column packing for a given fit-height
+// budget; see applyGrid for why it varies while the column count doesn't.
+func (m Model) applyLayoutFit(fitAvailH int) []column {
 	srcs := m.appliedSources()
 	base := make([]int, len(srcs))
 	for i, s := range srcs {
 		base[i] = max(len(m.applying[s]), 1)
 	}
-	return m.columnLayout(srcs, base, m.selectAvailHeight(), func(colW int) []int {
+	return m.columnLayout(srcs, base, m.selectAvailHeight(), fitAvailH, minApplyPanelH, func(colW int) []int {
 		errW := max(colW-2-panelGutter, 4)
 		content := make([]int, len(srcs))
 		for i, s := range srcs {
@@ -618,20 +642,47 @@ func columnsHeight(cols []column) int {
 	return h
 }
 
-// logPanelContentHeight is how many log lines are visible at once: whatever's
-// left below the panel grid, unbounded above so a small backend lets the log
-// claim the rest of the terminal. Returns -1 when there isn't even room for
-// an empty bordered box (3 lines) — the panel grid can already fill the
-// screen on its own, and the log shouldn't force the footer off screen.
-// Shared by the renderer (hides the panel on -1) and the scroll-key handler
-// (keyLog/logScrollMax in model.go) so scrolling never outruns what's drawn.
-func (m Model) logPanelContentHeight() int {
-	used := columnsHeight(m.applyLayout())
-	leftover := m.selectAvailHeight() - used
-	if leftover < 3 {
-		return -1
+// minLogBandH is the height reserved for the activity log band when the full-
+// height grid doesn't leave it any genuine room: 2 border + 1 header + 1
+// content line. Deliberately thin — reserving more would come out of the
+// panel grid's own floor (minApplyPanelH) and start eating package rows the
+// grid needs more than the log needs extra lines.
+const minLogBandH = 4
+
+// applyGrid returns the fit-height it settled on, the panel grid for the
+// Applying screen, and how many log lines fit below it (-1 if none). The
+// column *count* always comes from the full available height (via
+// applyLayoutFit -> columnLayout's packAvailH), so reserving room for the log
+// never forces extra, narrower columns; it tries the full height as the fit
+// budget too, and only when that leaves less than minLogBandH's worth of
+// leftover does it retry with the band reserved, which instead drains the
+// tallest panel further toward its floor (ordinary overflow shrinking) to
+// free up the log's space. Even reserved, a terminal too short for panels to
+// clear their own floor still returns -1 rather than forcing the footer off
+// screen.
+func (m Model) applyGrid() (int, []column, int) {
+	full := m.selectAvailHeight()
+	cols := m.applyLayoutFit(full)
+	leftover := full - columnsHeight(cols)
+	if leftover >= minLogBandH {
+		return full, cols, leftover - 3
 	}
-	return leftover - 3
+	fit := max(full-minLogBandH, 0)
+	cols = m.applyLayoutFit(fit)
+	leftover = full - columnsHeight(cols)
+	if leftover < 3 {
+		return fit, cols, -1
+	}
+	return fit, cols, leftover - 3
+}
+
+// logPanelContentHeight is how many log lines are visible at once; see
+// applyGrid. Shared by the renderer (hides the panel on -1) and the
+// scroll-key handler (keyLog/logScrollMax in model.go) so scrolling never
+// outruns what's drawn.
+func (m Model) logPanelContentHeight() int {
+	_, _, h := m.applyGrid()
+	return h
 }
 
 // currentLayout picks the layout for whichever screen is active, so the
@@ -1377,6 +1428,12 @@ func pkgRowStatus(i int, name string, st *srcState) pkgStat {
 		return statPending
 	}
 	switch {
+	// Checked first: st.done is a simple counter, not an index, so once later
+	// items succeed it can overtake an earlier item that individually failed —
+	// failedItems must win over both the count-based and finished-wide checks
+	// below, or a package that errored out reads back as done.
+	case st.failedItems[name]:
+		return statFailed
 	case st.finished && !st.failed:
 		return statDone
 	case i < st.done:
@@ -1426,7 +1483,7 @@ func (m Model) renderApplyPanel(src string, totalW, totalH, index int) string {
 	done := 0
 	if st != nil {
 		done = st.done
-		if st.finished && !st.failed {
+		if st.finished && !st.failed && len(st.failedItems) == 0 {
 			done = total // PackageKit never counts items; its final Done means all
 		}
 	}
@@ -1551,8 +1608,10 @@ func (m Model) renderApplyPanel(src string, totalW, totalH, index int) string {
 
 // renderGlobalLogPanel draws the cross-backend activity log band below the
 // panel grid: a chronological feed of every EventError/EventPrompt/EventLog
-// across all backends, tagged by source. Scrolls via keyLog/logScroll
-// (model.go); the header's right-hand note shows how far back it's scrolled.
+// across all backends, tagged by source — or, with logFailuresOnly toggled on
+// (keys.LogFilter), just the EventError lines. Scrolls via keyLog/logScroll
+// (model.go); the header's right-hand note shows the filter and how far back
+// it's scrolled.
 func (m Model) renderGlobalLogPanel(totalW, totalH int) string {
 	innerW := max(totalW-2, 8)
 	innerH := max(totalH-2, 1)
@@ -1560,16 +1619,20 @@ func (m Model) renderGlobalLogPanel(totalW, totalH int) string {
 	contentH := max(innerH-1, 1)
 
 	right := ""
+	if m.logFailuresOnly {
+		right = " failures only"
+	}
 	if m.logScroll > 0 {
-		right = fmt.Sprintf(" ↑ %d", m.logScroll)
+		right += fmt.Sprintf(" ↑ %d", m.logScroll)
 	}
 	lines := make([]string, 0, innerH)
 	lines = append(lines, panelHeader(0, "Activity Log", right, contentW, "", ""))
 
-	end := clampInt(len(m.globalLog)-m.logScroll, 0, len(m.globalLog))
+	entries := m.visibleLog()
+	end := clampInt(len(entries)-m.logScroll, 0, len(entries))
 	start := max(end-contentH, 0)
 	body := make([]string, 0, contentH)
-	for _, e := range m.globalLog[start:end] {
+	for _, e := range entries[start:end] {
 		label := m.sourceLabel(e.source)
 		textW := max(contentW-lipgloss.Width(label)-1, 1)
 		line := label + " " + dimStyle.Render(truncate(stripCR(e.text), textW))
@@ -1670,11 +1733,18 @@ func (m Model) applyBottomLine(st *srcState, done int, frac float64, totalBytes 
 	case st != nil && st.failed:
 		return errStyle.Render(truncate("✗ "+st.errText, max(w, 1)))
 	case st != nil && st.finished:
-		note := fmt.Sprintf("✓ done (%d upgraded)", done)
-		if d := st.elapsed(); d > 0 {
-			note += sepTight + formatDuration(d)
+		summary := fmt.Sprintf("%d upgraded", done)
+		note := okStyle.Render("✓ done (" + summary + ")")
+		if n := len(st.failedItems); n > 0 {
+			// done already excludes failedItems (see renderApplyPanel), so the two
+			// counts are disjoint — together they account for every selected item.
+			note = okStyle.Render("done ("+summary+", ") +
+				errStyle.Render(fmt.Sprintf("%d failed", n)) + okStyle.Render(")")
 		}
-		return okStyle.Render(note)
+		if d := st.elapsed(); d > 0 {
+			note += dimStyle.Render(sepTight + formatDuration(d))
+		}
+		return note
 	default:
 		// Silent prep phase: the backend has started but emitted no progress yet
 		// (dnf5 spends seconds on metadata/depsolve before its first signal). Show

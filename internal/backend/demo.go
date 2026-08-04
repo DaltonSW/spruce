@@ -103,13 +103,18 @@ func (d demoBackend) Apply(ctx context.Context, plan core.Plan) (<-chan core.Pro
 			}
 			sleep(ctx, jitter(2*d.applyStep))
 
-			// Fail "partway" only when there's more than one item — a one-off
-			// install of a single package has no midpoint to fail at, and should
-			// be allowed to succeed.
+			// Fail one item partway through, only when there's more than one item
+			// — a one-off install of a single package has no midpoint to fail at,
+			// and should be allowed to succeed. Real backends (flatpak, npm, …)
+			// keep applying the rest of the selection after one package errors —
+			// see flatpak.go's per-item runUpdate loop — so this only skips the
+			// done event for the failed item and moves on, rather than aborting
+			// the whole run.
 			if d.failApply && len(plan.Selected) > 1 && i == len(plan.Selected)/2 {
-				emit(core.ProgressEvent{Kind: core.EventError, Text: "simulated failure during install"})
-				emit(core.ProgressEvent{Kind: core.EventDone})
-				return
+				if !emit(core.ProgressEvent{Kind: core.EventError, Item: u.Name, Text: "simulated failure during install"}) {
+					return
+				}
+				continue
 			}
 			if !emit(core.ProgressEvent{Kind: core.EventItemDone, OK: true}) {
 				return

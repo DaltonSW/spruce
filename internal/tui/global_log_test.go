@@ -42,6 +42,47 @@ func TestApplyEventGlobalLogFiltering(t *testing.T) {
 			t.Errorf("entry source = %q, want npm", e.source)
 		}
 	}
+	if m.globalLog[0].isError || m.globalLog[1].isError {
+		t.Errorf("EventLog/EventPrompt entries should not be tagged isError: %+v", m.globalLog[:2])
+	}
+	if !m.globalLog[2].isError {
+		t.Errorf("EventError entry should be tagged isError")
+	}
+}
+
+// keys.LogFilter toggles the log between every message and just the ones
+// tagged isError (EventError); logScroll resets so switching views can't land
+// on an out-of-range offset counted against the other list's length.
+func TestLogFilterTogglesFailuresOnly(t *testing.T) {
+	m := New(context.TODO(), func() {}, Options{})
+	m.state = stateApplying
+	m.applyEvent(core.ProgressEvent{Kind: core.EventLog, Source: "npm", Text: "resolving dependencies"})
+	m.applyEvent(core.ProgressEvent{Kind: core.EventError, Source: "npm", Item: "typescript", Text: "exit status 1"})
+	m.applyEvent(core.ProgressEvent{Kind: core.EventLog, Source: "brew", Text: "downloading"})
+
+	if got, want := len(m.visibleLog()), 3; got != want {
+		t.Fatalf("visibleLog() unfiltered = %d entries, want %d", got, want)
+	}
+
+	filter := tea.KeyPressMsg{Code: 'f', Text: "f"}
+	tm, _ := m.keyLog(filter)
+	m = tm.(Model)
+	if !m.logFailuresOnly {
+		t.Fatalf("LogFilter should toggle logFailuresOnly on")
+	}
+	visible := m.visibleLog()
+	if len(visible) != 1 || !visible[0].isError {
+		t.Fatalf("visibleLog() filtered = %+v, want just the one isError entry", visible)
+	}
+
+	tm, _ = m.keyLog(filter)
+	m = tm.(Model)
+	if m.logFailuresOnly {
+		t.Fatalf("second LogFilter press should toggle logFailuresOnly back off")
+	}
+	if len(m.visibleLog()) != 3 {
+		t.Fatalf("visibleLog() after toggling off = %d entries, want 3", len(m.visibleLog()))
+	}
 }
 
 // The global log aggregates every backend, so it's capped higher than a
@@ -49,7 +90,7 @@ func TestApplyEventGlobalLogFiltering(t *testing.T) {
 func TestGlobalLogBounded(t *testing.T) {
 	m := New(context.TODO(), func() {}, Options{})
 	for i := 0; i < 1005; i++ {
-		m.appendGlobalLog("npm", "line")
+		m.appendGlobalLog("npm", "line", false)
 	}
 	if len(m.globalLog) != 1000 {
 		t.Fatalf("globalLog len = %d, want 1000 (bounded)", len(m.globalLog))
@@ -62,16 +103,16 @@ func TestGlobalLogBounded(t *testing.T) {
 func TestGlobalLogScrollPreservesPositionOnAppend(t *testing.T) {
 	m := New(context.TODO(), func() {}, Options{})
 	for i := 0; i < 20; i++ {
-		m.appendGlobalLog("npm", "line")
+		m.appendGlobalLog("npm", "line", false)
 	}
 	m.logScroll = 5
-	m.appendGlobalLog("npm", "new line")
+	m.appendGlobalLog("npm", "new line", false)
 	if m.logScroll != 6 {
 		t.Fatalf("logScroll after append while scrolled = %d, want 6 (grew to hold position)", m.logScroll)
 	}
 
 	m.logScroll = 0
-	m.appendGlobalLog("npm", "another line")
+	m.appendGlobalLog("npm", "another line", false)
 	if m.logScroll != 0 {
 		t.Fatalf("logScroll after append while pinned to tail = %d, want 0 (stays following)", m.logScroll)
 	}
@@ -83,7 +124,7 @@ func TestLogScrollClamping(t *testing.T) {
 	m := New(context.TODO(), func() {}, Options{})
 	m.state = stateApplying
 	for i := 0; i < 20; i++ {
-		m.appendGlobalLog("npm", "line")
+		m.appendGlobalLog("npm", "line", false)
 	}
 
 	up := tea.KeyPressMsg{Code: 'k', Text: "k"}

@@ -36,17 +36,18 @@ type row struct {
 
 // srcState tracks live progress for one backend during Applying.
 type srcState struct {
-	phase    string
-	status   string // transaction-wide phase label (EventStatus), e.g. "resolving dependencies…"
-	item     string
-	done     int
-	fraction float64            // 0–1 progress for the current item, if reported
-	pkgFrac  map[string]float64 // monotonic per-package progress (0–1), keyed by name
-	failed   bool
-	finished bool
-	errText  string
-	seen     map[string]bool // package names that have been the active item at least once
-	logs     []string        // tail of this backend's raw output, shown in its panel
+	phase       string
+	status      string // transaction-wide phase label (EventStatus), e.g. "resolving dependencies…"
+	item        string
+	done        int
+	fraction    float64            // 0–1 progress for the current item, if reported
+	pkgFrac     map[string]float64 // monotonic per-package progress (0–1), keyed by name
+	failed      bool               // a fatal, backend-wide error (no specific item) — see EventError handling
+	finished    bool
+	errText     string
+	failedItems map[string]bool // items that individually errored out; the backend kept going past them
+	seen        map[string]bool // package names that have been the active item at least once
+	logs        []string        // tail of this backend's raw output, shown in its panel
 
 	started    time.Time // first event seen for this backend (apply start)
 	finishedAt time.Time // when EventDone arrived, to freeze the elapsed timer
@@ -86,10 +87,13 @@ func (st *srcState) appendLog(line string) {
 	}
 }
 
-// logEntry is one line in the cross-backend activity log.
+// logEntry is one line in the cross-backend activity log. isError marks a
+// line that came from EventError, so the log can be filtered to failures only
+// without guessing from the rendered "✗ " prefix.
 type logEntry struct {
-	source string
-	text   string
+	source  string
+	text    string
+	isError bool
 }
 
 // Model is the whole application state.
@@ -158,8 +162,11 @@ type Model struct {
 	// globalLog is the chronological, cross-backend activity log shown below
 	// the per-backend panels during Applying/Done. logScroll is how many lines
 	// it's scrolled up from the newest entry; 0 means pinned to the tail.
-	globalLog []logEntry
-	logScroll int
+	// logFailuresOnly toggles the log (keys.LogFilter) between every message
+	// and just the ones that came from EventError.
+	globalLog       []logEntry
+	logScroll       int
+	logFailuresOnly bool
 
 	// Flags from the CLI.
 	autoYes bool   // -y: skip the gates and apply the default selection at once
@@ -435,11 +442,20 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// keyLog scrolls the cross-backend activity log — the only interactive
-// content the Applying/Done screens have besides Cancel/More/QuitDone.
-// logScroll counts lines scrolled up from the newest entry; Up/PageUp/Home
-// move toward older lines, Down/PageDown/End back toward the tail.
+// keyLog scrolls the cross-backend activity log and toggles its filter — the
+// only interactive content the Applying/Done screens have besides
+// Cancel/More/QuitDone. logScroll counts lines scrolled up from the newest
+// (visible) entry; Up/PageUp/Home move toward older lines, Down/PageDown/End
+// back toward the tail.
 func (m Model) keyLog(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, m.keys.LogFilter) {
+		m.logFailuresOnly = !m.logFailuresOnly
+		// The filtered list is a different length and the old offset was
+		// counted against the other one; pinning to the tail avoids scrolling
+		// to an unrelated (or out-of-range) spot in the new view.
+		m.logScroll = 0
+		return m, nil
+	}
 	hi := m.logScrollMax()
 	page := m.logVisibleHeight()
 	switch {
@@ -468,9 +484,11 @@ func (m Model) logVisibleHeight() int {
 }
 
 // logScrollMax is the furthest logScroll can go: enough to bring the oldest
-// entry to the top of the panel, floored at 0 so a short log can't scroll.
+// visible entry to the top of the panel, floored at 0 so a short log can't
+// scroll. Counted against visibleLog, not globalLog, so the filter (see
+// logFailuresOnly) doesn't let the log scroll past entries it isn't showing.
 func (m Model) logScrollMax() int {
-	return max(len(m.globalLog)-m.logVisibleHeight(), 0)
+	return max(len(m.visibleLog())-m.logVisibleHeight(), 0)
 }
 
 // restartChecks returns from the Done screen to a fresh Selecting list, re-running
@@ -513,7 +531,11 @@ func (m Model) restartChecks() (tea.Model, tea.Cmd) {
 // packages a backend applied cleanly; a failed backend keeps its items so the
 // user can retry. Genuinely-fresh data is one Rescan (ctrl+r) away.
 func (m Model) returnToUpdates() (tea.Model, tea.Cmd) {
-	// Only backends that finished without failing count as "applied".
+	// Only packages that actually applied cleanly count as "applied": skip a
+	// backend entirely on a fatal, backend-wide error (st.failed — nothing in
+	// it ran), but within an otherwise-finished backend keep only the specific
+	// items that individually errored out, so a partial flatpak/npm/etc. run
+	// doesn't re-offer packages that already succeeded.
 	remove := map[string]bool{}
 	for name, ups := range m.applying {
 		st := m.progress[name]
@@ -521,6 +543,9 @@ func (m Model) returnToUpdates() (tea.Model, tea.Cmd) {
 			continue
 		}
 		for _, u := range ups {
+			if st.failedItems[u.Name] {
+				continue
+			}
 			remove[u.ID()] = true
 		}
 	}
@@ -937,17 +962,28 @@ func (m *Model) applyEvent(ev core.ProgressEvent) {
 		st.done++
 		st.fraction = 0
 	case core.EventError:
-		st.failed = true
-		st.errText = ev.Text
+		// An error tied to one item (flatpak/npm/etc. keep applying the rest of
+		// the selection after a single package fails) marks just that row failed.
+		// A backend-wide error (no item — e.g. npm's root-owned-prefix bail, or
+		// snapd never returning a change id) takes over the whole panel instead.
+		if ev.Item != "" {
+			if st.failedItems == nil {
+				st.failedItems = map[string]bool{}
+			}
+			st.failedItems[ev.Item] = true
+		} else {
+			st.failed = true
+			st.errText = ev.Text
+		}
 		st.appendLog("✗ " + ev.Text)
-		m.appendGlobalLog(ev.Source, "✗ "+ev.Text)
+		m.appendGlobalLog(ev.Source, "✗ "+ev.Text, true)
 	case core.EventStatus:
 		// Transaction-wide phase label; deliberately touches nothing else so it
 		// can't disturb per-package item/progress state.
 		st.status = ev.Phase
 	case core.EventPrompt:
 		st.appendLog("⏸ " + ev.Text)
-		m.appendGlobalLog(ev.Source, "⏸ "+ev.Text)
+		m.appendGlobalLog(ev.Source, "⏸ "+ev.Text, false)
 	case core.EventDone:
 		st.finished = true
 		st.phase = "Done"
@@ -957,21 +993,39 @@ func (m *Model) applyEvent(ev core.ProgressEvent) {
 	case core.EventLog:
 		st.appendLog(ev.Text)
 		if ev.Text != "" {
-			m.appendGlobalLog(ev.Source, ev.Text)
+			m.appendGlobalLog(ev.Source, ev.Text, false)
 		}
 	}
 }
 
 // appendGlobalLog records one line in the cross-backend activity log, keeping
 // a bounded tail. If the user has scrolled up, the offset grows by one so the
-// lines they're looking at stay put instead of jumping to the new tail.
-func (m *Model) appendGlobalLog(source, text string) {
+// lines they're looking at stay put instead of jumping to the new tail — but
+// only when the new line is one the current filter (logFailuresOnly) would
+// actually show, or the view would shift under a line the user can't see.
+func (m *Model) appendGlobalLog(source, text string, isError bool) {
 	const max = 1000
-	m.globalLog = append(m.globalLog, logEntry{source: source, text: text})
+	m.globalLog = append(m.globalLog, logEntry{source: source, text: text, isError: isError})
 	if len(m.globalLog) > max {
 		m.globalLog = m.globalLog[len(m.globalLog)-max:]
 	}
-	if m.logScroll > 0 {
+	if m.logScroll > 0 && (!m.logFailuresOnly || isError) {
 		m.logScroll++
 	}
+}
+
+// visibleLog is the globalLog entries the current filter shows: every message,
+// or (with logFailuresOnly toggled on via keys.LogFilter) just the ones that
+// came from EventError.
+func (m Model) visibleLog() []logEntry {
+	if !m.logFailuresOnly {
+		return m.globalLog
+	}
+	out := make([]logEntry, 0, len(m.globalLog))
+	for _, e := range m.globalLog {
+		if e.isError {
+			out = append(out, e)
+		}
+	}
+	return out
 }

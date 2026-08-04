@@ -35,6 +35,7 @@ type keyMap struct {
 	QuitDone     key.Binding
 	More         key.Binding
 	Rescan       key.Binding
+	LogFilter    key.Binding
 }
 
 // defaultKeys mirrors the bindings (and footer wording) the TUI used when these
@@ -80,6 +81,7 @@ func defaultKeys() keyMap {
 		QuitDone:   key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q", "quit")),
 		More:       key.NewBinding(key.WithKeys("enter", "r"), key.WithHelp("enter", "back to updates")),
 		Rescan:     key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "rescan")),
+		LogFilter:  key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "filter log")),
 	}
 }
 
@@ -117,9 +119,9 @@ func (k keyMap) brewAskHelp() []key.Binding {
 }
 
 func (k keyMap) applyingHelp() []key.Binding {
-	return []key.Binding{k.Up, k.PageUp, k.Home, k.Cancel}
+	return []key.Binding{k.Up, k.PageUp, k.Home, k.LogFilter, k.Cancel}
 }
 
 func (k keyMap) doneHelp() []key.Binding {
-	return []key.Binding{k.Up, k.PageUp, k.Home, k.More, k.QuitDone}
+	return []key.Binding{k.Up, k.PageUp, k.Home, k.LogFilter, k.More, k.QuitDone}
 }

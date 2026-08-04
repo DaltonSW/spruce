@@ -91,13 +91,13 @@ func TestSelectingFitsTerminal(t *testing.T) {
 // does the tallest (the big system list) shrink, leaving the small panels whole.
 func TestPanelLayoutContentSized(t *testing.T) {
 	// Everything fits: each panel is exactly border(2)+header(1)+content.
-	if got := panelLayout([]int{8, 1, 3}, 40); !equalInts(got, []int{11, 4, 6}) {
+	if got := panelLayout([]int{8, 1, 3}, 40, minStackPanelH); !equalInts(got, []int{11, 4, 6}) {
 		t.Errorf("fitting layout = %v, want [11 4 6]", got)
 	}
 
 	// Overflow: small panels stay at their natural height, the big one absorbs
 	// the shrink, and the heights sum to exactly availH.
-	got := panelLayout([]int{200, 1, 4}, 30)
+	got := panelLayout([]int{200, 1, 4}, 30, minStackPanelH)
 	if sum(got) != 30 {
 		t.Errorf("overflow layout %v sums to %d, want 30", got, sum(got))
 	}
@@ -112,7 +112,7 @@ func TestPanelLayoutContentSized(t *testing.T) {
 	// *below* it. The system drains all the way to the floor first, so an 8-update
 	// backend keeps its full 11 lines while system gives up its rows and scrolls —
 	// the old layout equalized the two and clipped the small panel instead.
-	tight := panelLayout([]int{100, 8}, 20)
+	tight := panelLayout([]int{100, 8}, 20, minStackPanelH)
 	if sum(tight) != 20 {
 		t.Errorf("tight layout %v sums to %d, want 20", tight, sum(tight))
 	}
@@ -418,7 +418,10 @@ func TestApplyPanelListsPackages(t *testing.T) {
 	// brew's apply panel now reserves 2 lines for its spacer + progress bar, so it
 	// stands whole while the big system list scrolls; give the tight test terminal
 	// those 2 rows back so the system window still spans done + active + pending.
-	m.height += 2
+	// Also give back minLogBandH: the grid reserves that much for the activity log
+	// whenever it would otherwise fill the screen (see applyGrid), and this test's
+	// terminal is exactly that case.
+	m.height += 2 + minLogBandH
 	m.applying = m.selectionByBackend()
 	m.state = stateApplying
 
