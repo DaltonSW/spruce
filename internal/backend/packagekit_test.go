@@ -8,17 +8,11 @@ import (
 	"go.dalton.dog/spruce/internal/core"
 )
 
-// TestPackageKitDryRunIsPreviewOnly guards the dry-run fix: PackageKit's
-// SIMULATE transaction flag was ignored by the dnf5 backend and a "dry run"
-// upgraded the system for real. A dry run must now stay entirely in the
-// early-return preview branch — it must never open the system bus or call the
-// mutating UpdatePackages.
-//
-// We assert the event stream has the exact preview shape. Only the dry-run
-// branch emits "Would update" phases (the real path emits "Updating" and needs
-// a D-Bus connection), so matching that shape proves we never reached the
-// mutating path. The timeout guards against a regression where the real path
-// leaks through and blocks on polkit/the daemon.
+// TestPackageKitDryRunIsPreviewOnly guards against dnf5 ignoring SIMULATE: a
+// dry run must stay in the early-return preview branch and never touch the
+// system bus or call UpdatePackages. Matching the "Would update" event shape
+// (only the preview branch emits it) proves that; the timeout catches a
+// regression where the real path leaks through and blocks on polkit.
 func TestPackageKitDryRunIsPreviewOnly(t *testing.T) {
 	sel := []core.Update{
 		{Name: "bash", NewVersion: "5.2.1", Source: "system", Ref: "bash;5.2.1;x86_64;updates", Kind: "package"},

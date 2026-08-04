@@ -326,11 +326,8 @@ func (m Model) sourceRows(src string) []row {
 	return out
 }
 
-// selectAvailHeight is the height available to the panel grid, after the header
-// block above (top-padding line + content lines + one blank separator line) and
-// the count/help lines below: one status line plus the three-row selecting footer
-// (4). With the plain 1-line title this is m.height-7. The apply screen's footer
-// is shorter, so it just leaves a couple extra blank lines at the bottom.
+// selectAvailHeight is the height available to the panel grid, after the
+// header block and the count/help lines below it (status line + 3-row footer).
 func (m Model) selectAvailHeight() int {
 	return max(m.height-m.headerHeight(m.width)-6, 6)
 }
@@ -388,11 +385,10 @@ func (m Model) sourceLabel(src string) string {
 	return style.Render(name)
 }
 
-// panelHeader renders a panel's header line — the backend's icon and name in its
-// accent color, with a dim right-hand note (count/spinner/timer) beside it —
-// padded to the content width. Shared by the selecting and applying panels so the
-// two can't drift. color/icon are the backend's; "" falls back to the UI accent
-// and no icon.
+// panelHeader renders a panel's header line — icon and name in its accent
+// color, with a dim right-hand note (count/spinner/timer) — shared by the
+// selecting and applying panels so the two can't drift. color/icon are the
+// backend's; "" falls back to the UI accent and no icon.
 func panelHeader(index int, src, right string, contentW int, icon, color string) string {
 	style := groupStyle
 	if color != "" {
@@ -419,15 +415,10 @@ func panelHeader(index int, src, right string, contentW int, icon, color string)
 	return padRight(badge+style.Render(title)+dimStyle.Render(right), contentW)
 }
 
-// panelLayout returns the total (bordered) height of each panel, in order, given
-// the content lines each one wants (its update count, or 1 for a
-// checking/errored/up-to-date panel). Each panel is sized to its content —
-// border + header + content — so a backend with a single update doesn't sprawl.
-// When the panels' natural heights don't all fit in availH, the panel with the
-// largest natural height (the system list) is drained all the way to the floor
-// before any smaller panel is touched — so the big list shrinks and scrolls
-// while the small backends stay whole. If everything fits, the stack is shorter
-// than availH and leaves blank space below rather than padding panels out.
+// panelLayout returns the total (bordered) height of each panel, in order,
+// sized to its content so a backend with a single update doesn't sprawl. When
+// heights overflow availH, the tallest panel (the system list) drains to its
+// floor first, so it shrinks and scrolls while smaller panels stay whole.
 func panelLayout(content []int, availH int) []int {
 	heights := make([]int, len(content))
 	naturals := make([]int, len(content))
@@ -440,13 +431,12 @@ func panelLayout(content []int, availH int) []int {
 	return shrinkToFit(heights, naturals, floors, availH)
 }
 
-// shrinkToFit drains a set of panel/band heights down to availH, reclaiming from
-// the entry with the largest natural height first and draining it fully to its
-// floor before touching the next-largest — so the biggest item (the system list)
-// absorbs the squeeze and scrolls while smaller ones stay whole. heights is
-// mutated in place and returned; floors[i] is the smallest height entry i may
-// shrink to. When everything is already at its floor the total may still exceed
-// availH (the caller overflows the screen), matching the old behavior.
+// shrinkToFit drains a set of panel/band heights down to availH, reclaiming
+// from the largest entry first and draining it fully to its floor before
+// touching the next — so the biggest item absorbs the squeeze while smaller
+// ones stay whole. heights is mutated in place and returned; floors[i] is the
+// smallest entry i may shrink to. If everything's at its floor, total may
+// still exceed availH.
 func shrinkToFit(heights, naturals, floors []int, availH int) []int {
 	total := 0
 	for _, h := range heights {
@@ -506,12 +496,10 @@ func naturalsOf(content []int) []int {
 	return n
 }
 
-// columnCount chooses how many columns to split into. A panel taller than the
-// screen (the system list) will scroll no matter what, so it takes a column of
-// its own; the shorter panels are packed into just enough further columns that
-// each column's content fits the height. The result is capped by maxCols (what
-// the terminal width allows), so a narrow terminal collapses to one column and a
-// short-enough set of backends stays a single readable stack.
+// columnCount chooses how many columns to split into: a panel taller than the
+// screen gets a column of its own, and the shorter panels are packed into just
+// enough further columns to fit. Capped by maxCols (what the terminal width
+// allows), so a narrow terminal collapses to one column.
 func columnCount(naturals []int, availH, maxCols int) int {
 	tall, shortSum, shortN := 0, 0, 0
 	for _, n := range naturals {
@@ -532,14 +520,11 @@ func columnCount(naturals []int, availH, maxCols int) int {
 }
 
 // columnLayout packs panels into balanced columns: each panel (in panels()
-// order) drops into the currently-shortest column, so the tall system list lands
-// alone in one column and the small backends stack beside it in the next — using
-// the horizontal space instead of scrolling the big list under a wasted right
-// margin. remeasure, when non-nil, recomputes the content-line counts once the
-// column width is known (apply panels wrap their error text to the column width).
-// availH is the vertical space the panels may use; callers reserve whatever
-// else the screen needs (status line, footer, the Applying log band) before
-// passing it in.
+// order) drops into the currently-shortest column, so the tall system list
+// lands alone in one column and small backends stack beside it. remeasure,
+// when non-nil, recomputes content-line counts once the column width is known
+// (apply panels wrap error text to it). availH is the vertical space the
+// panels may use; callers reserve whatever else the screen needs first.
 func (m Model) columnLayout(sources []string, content []int, availH int, remeasure func(colW int) []int) []column {
 	fullW := m.width
 	if fullW <= 0 {
@@ -592,15 +577,11 @@ func (m Model) selectLayout() []column {
 }
 
 // applyLayout is the column layout for the Applying screen. A normal panel
-// reserves two extra content lines beyond its package count for the blank
-// spacer + overall progress bar that renderApplyPanel pins to the bottom, so
-// the whole package list fits without being scrolled. A failed backend renders
-// no bar; its content instead grows to fit the word-wrapped error, measured at
-// the column width so the whole reason stays legible rather than clipped. This
-// always gets the full available height, exactly as it did before the
-// activity log band existed — the log (below it, logPanelContentHeight) only
-// ever uses genuine leftover space, never space taken from the grid, so a
-// failed backend's full error is never squeezed to make room for the log.
+// reserves two extra content lines for the spacer + overall progress bar that
+// renderApplyPanel pins to the bottom. A failed backend renders no bar;
+// instead its content grows to fit the word-wrapped error at the column
+// width. This always gets the full available height — the activity log below
+// it only ever claims genuine leftover space, never space taken from the grid.
 func (m Model) applyLayout() []column {
 	srcs := m.appliedSources()
 	base := make([]int, len(srcs))
@@ -638,16 +619,12 @@ func columnsHeight(cols []column) int {
 }
 
 // logPanelContentHeight is how many log lines are visible at once: whatever's
-// left below the panel grid (never space taken from it — applyLayout always
-// gets the full available height), unbounded above so a small backend with
-// few packages lets the log claim the whole rest of the terminal instead of
-// idling behind a fixed-height band while the log itself scrolls. Returns -1
-// when there isn't even room for an empty bordered box (3 lines: 2 border + 1
-// header) — the panel grid, on a big enough list, can already fill the whole
-// screen on its own, and the log shouldn't force the status line and footer
-// off screen to insist on appearing anyway. Shared by the renderer (which
-// hides the panel on -1) and the scroll-key handler (keyLog/logScrollMax in
-// model.go) so scrolling never outruns what's drawn.
+// left below the panel grid, unbounded above so a small backend lets the log
+// claim the rest of the terminal. Returns -1 when there isn't even room for
+// an empty bordered box (3 lines) — the panel grid can already fill the
+// screen on its own, and the log shouldn't force the footer off screen.
+// Shared by the renderer (hides the panel on -1) and the scroll-key handler
+// (keyLog/logScrollMax in model.go) so scrolling never outruns what's drawn.
 func (m Model) logPanelContentHeight() int {
 	used := columnsHeight(m.applyLayout())
 	leftover := m.selectAvailHeight() - used
@@ -715,10 +692,9 @@ func (m Model) panelContentLines() []int {
 }
 
 // panelRows splits a panel's content area (contentH lines, header already
-// excluded) into the row capacity and whether the scroll status line is shown.
-// The status line is reserved only when the list overflows AND there's room for
-// at least one row alongside it; in a one-line content area the row wins, so a
-// tiny panel never renders past its bounds.
+// excluded) into the row capacity and whether the scroll status line is
+// shown. The status line is reserved only when the list overflows and there's
+// room for at least one row alongside it.
 func panelRows(rowCount, contentH int) (rowCap int, showStatus bool) {
 	if rowCount > contentH && contentH >= 2 {
 		return contentH - 1, true
@@ -758,11 +734,10 @@ func (m Model) focusedSource() string {
 	return ""
 }
 
-// tableFor returns the persistent table.Model backing src's panel, creating it on
-// first use. The table owns the panel's cursor + scroll; spruce renders each row
-// itself (into a single full-width column) so the existing per-cell styling —
-// checkbox, dim versions, (pin) badge, ▶ marker — carries over verbatim. Cell and
-// Selected styles are no-ops because all styling lives in the rendered row.
+// tableFor returns the persistent table.Model backing src's panel, creating
+// it on first use. The table owns the panel's cursor + scroll; spruce renders
+// each row itself into a single full-width column, so Cell/Selected styles
+// are no-ops — all styling lives in the rendered row.
 func (m *Model) tableFor(src string) *table.Model {
 	if t, ok := m.tables[src]; ok {
 		return t
@@ -794,11 +769,9 @@ func (m *Model) syncTable(src string) {
 	t.SetHeight(rowCap + 1) // +1 for the table's (blank) header line
 
 	rs := m.sourceRows(src)
-	// A table synced while its backend still had 0 rows (e.g. during streaming
-	// discovery, before this backend's Check returns) gets its cursor driven to
-	// -1 by bubbles' SetRows underflow, and a later SetRows never lifts it back.
-	// A negative cursor makes UpdateViewport render one row short, clipping the
-	// last item until the user navigates. Restore it to the top once rows exist.
+	// A table synced while its backend still had 0 rows gets its cursor driven
+	// to -1 by bubbles' SetRows underflow and never lifted back, which clips
+	// the last row until the user navigates. Restore it once rows exist.
 	if t.Cursor() < 0 && len(rs) > 0 {
 		t.SetCursor(0)
 	}
@@ -915,13 +888,10 @@ func (m Model) renderPanel(src string, totalW, totalH, index int, focused bool) 
 	return solidBox(lines, focused, m.sourceColor(src))
 }
 
-// solidBox wraps content lines in a border that keeps the backend's own color in
-// every state, using two cues to mark the focused panel: the focused panel keeps
-// its color at full strength and gains a heavier thick border, while unfocused
-// panels dim their color (blended toward the background) and keep the lighter
-// rounded border — so the selected panel reads clearly without losing its hue.
-// A backend that declares no color falls back to the accent (focused) or the dim
-// border (unfocused).
+// solidBox wraps content lines in a border that keeps the backend's own color
+// in every state: the focused panel keeps full color + a thick border, while
+// unfocused panels dim their color and keep the lighter rounded border. A
+// backend with no color falls back to the accent (focused) or dim (unfocused).
 func solidBox(content []string, focused bool, color string) string {
 	style := lipgloss.NewStyle()
 	switch {
@@ -937,11 +907,9 @@ func solidBox(content []string, focused bool, color string) string {
 	return style.Render(strings.Join(content, "\n"))
 }
 
-// dimColor mutes a hex color for an unfocused panel's border: it mostly drops
-// saturation (so the color still reads as itself, just quieter) and only lightly
-// darkens, keeping the hue identifiable rather than blending it into a muddy
-// near-background shade. The focused panel — full color + thick border — stays
-// the clear standout. A color that won't parse is returned unchanged.
+// dimColor mutes a hex color for an unfocused panel's border: mostly drops
+// saturation and only lightly darkens, so the hue stays identifiable instead
+// of muddying toward the background. A color that won't parse is unchanged.
 func dimColor(hex string) string {
 	c, err := colorful.Hex(hex)
 	if err != nil {
@@ -1235,10 +1203,8 @@ func (m Model) planLines() []string {
 		return nil
 	}
 	// Notes (e.g. npm's root-owned-prefix warning) can run much longer than the
-	// rest of the modal's content, which is normally under ~40 cols of package
-	// rows. Without a cap the modal box grows to fit the longest note verbatim
-	// and can push past the terminal edge, so wrap to a fixed reading width
-	// (still shrinking further on a narrow terminal).
+	// rest of the modal, so wrap to a fixed reading width rather than letting
+	// the box grow past the terminal edge.
 	maxW := min(modalNoteWidth, max(m.width-8, 20))
 	out := []string{""}
 	for _, n := range notes {
@@ -1402,11 +1368,10 @@ const (
 )
 
 // pkgRowStatus classifies the package at index i in the (ordered) selection,
-// from whatever the backend has reported. The order of checks matters: a
-// completed count (or whole-backend finish) wins over the live "active item" so
-// a just-finished package doesn't flicker back to active before the next
-// EventPhase arrives. The seen-set covers backends (PackageKit) that run one
-// transaction and report by package name without ever emitting EventItemDone.
+// from whatever the backend has reported. Check order matters: a completed
+// count wins over the live "active item" so a just-finished package doesn't
+// flicker back to active. The seen-set covers backends (PackageKit) that
+// report by name without ever emitting EventItemDone.
 func pkgRowStatus(i int, name string, st *srcState) pkgStat {
 	if st == nil {
 		return statPending
@@ -1446,12 +1411,10 @@ func activeRow(pkgs []core.Update, st *srcState) int {
 	return max(len(pkgs)-1, 0)
 }
 
-// renderApplyPanel draws one backend's live apply box at the given total size:
-// a header with a done/total count, then every selected package listed with a
-// live status icon (done/active/pending/failed), and an overall progress bar
-// pinned to the bottom. When the list is short, the backend's own output tail
-// fills the leftover room. The border animates (gradient) while working, turns
-// green when finished and red when failed.
+// renderApplyPanel draws one backend's live apply box: a header with a
+// done/total count, every selected package with a live status icon, and an
+// overall progress bar pinned to the bottom. The border animates while
+// working, turns green when finished and red when failed.
 func (m Model) renderApplyPanel(src string, totalW, totalH, index int) string {
 	innerW := max(totalW-2, 8)
 	innerH := max(totalH-2, 1)
@@ -1587,12 +1550,9 @@ func (m Model) renderApplyPanel(src string, totalW, totalH, index int) string {
 }
 
 // renderGlobalLogPanel draws the cross-backend activity log band below the
-// per-backend panel grid: a chronological feed of every EventError/
-// EventPrompt/EventLog across all backends, tagged by source, so a failure
-// can be understood in the context of what its backend just printed instead
-// of hunting through that one backend's own (per-panel) output tail. Scrolls
-// via keyLog/logScroll (model.go); the header's right-hand note shows how far
-// back the view has scrolled.
+// panel grid: a chronological feed of every EventError/EventPrompt/EventLog
+// across all backends, tagged by source. Scrolls via keyLog/logScroll
+// (model.go); the header's right-hand note shows how far back it's scrolled.
 func (m Model) renderGlobalLogPanel(totalW, totalH int) string {
 	innerW := max(totalW-2, 8)
 	innerH := max(totalH-2, 1)
@@ -1626,16 +1586,14 @@ func (m Model) renderGlobalLogPanel(totalW, totalH int) string {
 }
 
 // renderApplyRow draws one package line in an apply panel: a status icon, the
-// name, and its version bump (the static size column is dropped during apply —
-// see applyColumns). The active row carries a spinner
-// and a live note (phase + downloaded/size + percent) so you can watch the work
-// move down the list. The whole row is bounded to innerW so the note can't spill
-// past the border.
+// name, and its version bump (the static size column is dropped during apply
+// — see applyColumns). The active row carries a spinner and a live note
+// (phase + downloaded/size + percent), bounded to innerW.
 func (m Model) renderApplyRow(i int, u core.Update, st *srcState, nameW, curW, newW, sizeW, barW, innerW int) string {
 	status := pkgRowStatus(i, u.Name, st)
 	// Before any package goes active, the transaction may already be working
-	// (dnf5's silent depsolve/download); show that status on the row next in line
-	// so even a one-row panel shows life instead of a bare ○ for tens of seconds.
+	// (dnf5's silent depsolve); show that on the next row so a one-row panel
+	// isn't a bare ○ for tens of seconds.
 	prepActive := st != nil && !st.finished && !st.failed && st.status != "" &&
 		st.item == "" && i == st.done
 
@@ -1685,11 +1643,10 @@ func (m Model) renderApplyRow(i int, u core.Update, st *srcState, nameW, curW, n
 	return line
 }
 
-// applyActiveNote describes what the active package is doing: its phase, and —
-// when the backend reports numeric progress and the size is known — the live
-// downloaded/size and percent (downloaded ≈ fraction × size). With no numeric
-// progress (brew/flatpak report phase only) it falls back to just the phase, so
-// we never show a misleading 0%.
+// applyActiveNote describes what the active package is doing: its phase, and
+// — when the backend reports numeric progress and the size is known — the
+// live downloaded/size and percent. With no numeric progress (brew/flatpak
+// report phase only) it falls back to just the phase, never a misleading 0%.
 func applyActiveNote(u core.Update, st *srcState) string {
 	note := st.phase
 	frac := clamp01(stFraction(st))
@@ -1802,12 +1759,10 @@ func (m Model) applyColWidthsFor(src string) (nameW, curW, newW, sizeW int) {
 }
 
 // applyColumns sizes the name / current / new columns for an apply panel,
-// reserving room for the leading status icon (1 col + space). Unlike the
-// selection panels, the apply view drops the static download-size column
-// entirely: the active row's live note (downloaded/size), the per-row bar, and
-// the footer's aggregate already carry that info, so the column would only cost
-// horizontal room. sizeW is always 0 here (kept in the signature so callers and
-// renderApplyRow share panelColumns' shape).
+// reserving room for the leading status icon. Unlike the selection panels,
+// the apply view drops the static download-size column entirely — the active
+// row's live note already carries that info — so sizeW is always 0 (kept in
+// the signature so callers and renderApplyRow share panelColumns' shape).
 func applyColumns(pkgs []core.Update, innerW int) (nameW, curW, newW, sizeW int) {
 	const overhead = 1 + 1 + 2 + 3 // icon, space, gap, " → "
 	for _, u := range pkgs {
@@ -1902,10 +1857,8 @@ func progressBar(f float64, w int, st *srcState) string {
 }
 
 // rowProgressBar draws one apply row's bar, colored by that row's status —
-// dim/idle while pending, accent while downloading, green once done, red on
-// failure — so completed rows read as a full green wall as the run progresses.
-// The bar is wrapped in dim brackets so the per-row bars read as distinct
-// units rather than clumping into one block down the column.
+// dim while pending, accent while downloading, green once done, red on
+// failure — wrapped in dim brackets so per-row bars read as distinct units.
 func rowProgressBar(f float64, w int, status pkgStat) string {
 	fill := colDim // pending: dim, reads as an empty/idle track
 	switch status {
@@ -1955,12 +1908,10 @@ func rowFraction(status pkgStat, name string, st *srcState) float64 {
 }
 
 // applyOverallFraction is the panel's overall progress: the mean of the
-// per-row fractions across every package. Because each row's fraction is
-// monotonic (a done/seen row stays at 1.0 and the active row reports its
-// persisted max via pkgFrac), the overall bar only ever advances — unlike a
-// naive (done + current-item fraction)/total, which snaps backwards when the
-// active item's fraction resets on each new package (e.g. PackageKit, which
-// never emits a per-item EventItemDone).
+// per-row fractions across every package. Each row's fraction is monotonic
+// (done stays at 1.0, active reports its persisted max via pkgFrac), so the
+// bar only ever advances — unlike a naive (done + current-item)/total, which
+// snaps backwards when a new package's fraction resets (e.g. PackageKit).
 func applyOverallFraction(pkgs []core.Update, st *srcState) float64 {
 	if len(pkgs) == 0 {
 		return 0

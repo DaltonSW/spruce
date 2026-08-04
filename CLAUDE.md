@@ -43,11 +43,12 @@ inside a backend implementation.
   Apply would do, fuel for the review screen), and `ProgressEvent` (the single
   currency `Apply` streams back). Read this first.
 - `internal/backend` — one file per manager (`packagekit.go`, `brew.go`,
-  `flatpak.go`, `snap.go`) plus `registry.go`. New backends are registered in
-  `all()` in `registry.go` **and nowhere else**. `Available()` filters to what
-  exists on the machine; `CheckAll()` runs every backend's `Check` concurrently.
-- `internal/ptyrun` — PTY streaming helper for CLI-wrapped backends (brew, flatpak)
-  so their progress output can be parsed into `ProgressEvent`s.
+  `flatpak.go`, `snap.go`, `goinstall.go`, `npm.go`) plus `registry.go`. New
+  backends are registered in `all()` in `registry.go` **and nowhere else**.
+  `Available()` filters to what exists on the machine; `CheckAll()` runs every
+  backend's `Check` concurrently.
+- `internal/ptyrun` — PTY streaming helper for CLI-wrapped backends (brew,
+  flatpak, go, npm) so their progress output can be parsed into `ProgressEvent`s.
 - `internal/tui` — Bubble Tea v2 model/view. State machine:
   `Discovering → Selecting → Reviewing → Applying → Done` (`state` enum in
   `model.go`). Each backend renders as its own always-visible panel, stacked
@@ -56,6 +57,10 @@ inside a backend implementation.
   `panelLayout` (`view.go`) sizes each panel to its content; when the panels'
   natural heights overflow the screen the tallest (the system list) shrinks and
   scrolls first, leaving the small backends whole.
+- `internal/config` — persisted user preferences (currently just brew
+  ask-mode consent), loaded once at startup.
+- `internal/version` — checks GitHub for a newer release; surfaced in the TUI
+  header as a one-line notice, never blocking.
 - `cmd` — fang/cobra command tree; root launches the TUI. `Version` is
   stamped via `-ldflags "-X go.dalton.dog/spruce/cmd.Version=..."`.
 

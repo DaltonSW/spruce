@@ -238,16 +238,14 @@ func (b Brew) Apply(ctx context.Context, plan core.Plan) (<-chan core.ProgressEv
 }
 
 // runUpgrade streams a single `brew upgrade <name>` (or `--cask <name>`),
-// translating output lines into structured events. Looping one package at a
-// time — rather than batching the whole selection into one brew invocation —
-// bounds brew's silent pre-flight (dependency resolution, bottle-manifest
-// fetch) to a single package per step instead of the whole selection, and
-// lets us announce the active item before brew prints anything at all.
+// translating output lines into structured events. One package per invocation
+// (rather than batching the whole selection) bounds brew's silent pre-flight
+// to a single package and lets us announce the active item up front.
 //
-// autoConfirm reflects the user's consent (secured by the TUI's own gate) to
-// suppress brew's "ask mode" install/upgrade confirmation prompt. Without it,
-// stdin is pinned to /dev/null over the PTY, so an unanswered prompt reads as
-// EOF and brew declines the upgrade rather than hanging.
+// autoConfirm suppresses brew's "ask mode" confirmation prompt (consent
+// secured by the TUI's own gate); without it, stdin is pinned to /dev/null
+// over the PTY, so brew reads an unanswered prompt as EOF and declines rather
+// than hanging.
 func (b Brew) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, u core.Update, dryRun, autoConfirm bool) {
 	argv := []string{"brew", "upgrade"}
 	if dryRun {

@@ -60,10 +60,8 @@ func availableCmd(demo bool) tea.Cmd {
 }
 
 // checkVersionCmd fetches the latest spruce release from GitHub and compares it
-// to the build-time version stamp. It runs once at launch, off the UI loop, so
-// a slow or unreachable network never delays the app. Any failure returns a
-// zero Result (no notice), making the check invisible when it can't succeed.
-// A "dev" build skips the check entirely.
+// to the build-time version stamp, off the UI loop so a slow network never
+// delays the app. Failures are silent; a "dev" build skips the check entirely.
 func checkVersionCmd(ctx context.Context, current string) tea.Cmd {
 	return func() tea.Msg {
 		return versionCheckedMsg{result: version.Check(ctx, current)}
@@ -123,11 +121,10 @@ func saveConfigCmd(cfg config.Config) tea.Cmd {
 	}
 }
 
-// resolvePlansCmd resolves a Plan for every selected backend concurrently. Plan
-// is read-only but may be slow (brew shells out to `brew upgrade --dry-run` to
-// learn the pulled-in dependents), so it runs off the UI loop. The result feeds
-// the review/confirm screens (notes, sizes) and is reused as the input to Apply,
-// so each backend is planned exactly once per run.
+// resolvePlansCmd resolves a Plan for every selected backend concurrently, off
+// the UI loop since Plan can be slow (brew shells out to `brew upgrade
+// --dry-run`). The result feeds the review/confirm screens and is reused as
+// the input to Apply, so each backend is planned exactly once per run.
 func resolvePlansCmd(ctx context.Context, sel map[string][]core.Update, byName map[string]core.Backend) tea.Cmd {
 	return func() tea.Msg {
 		plans := map[string]core.Plan{}

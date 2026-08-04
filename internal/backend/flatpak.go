@@ -69,12 +69,9 @@ func (Flatpak) Check(ctx context.Context) ([]core.Update, error) {
 					u.SizeBytes = int64(n)
 				}
 			}
-			// Flatpak's version field often doesn't change between releases —
-			// the real difference is the commit. When the version strings would
-			// be identical (or are absent), fall back to the commit so the two
-			// columns differ. To avoid burning width repeating the same version
-			// on both sides, show it once (with the from-commit) on the left and
-			// only the to-commit on the right: "1.2 (aaaaaaa) → bbbbbbb".
+			// Flatpak's version field often doesn't change between releases — the
+			// real difference is the commit — so fall back to it when versions
+			// match: "1.2 (aaaaaaa) → bbbbbbb".
 			if u.NewVersion == u.CurrentVersion {
 				from, to := shortCommit(cur.commit), shortCommit(newCommit)
 				u.CurrentVersion = joinVersionCommit(u.CurrentVersion, from)

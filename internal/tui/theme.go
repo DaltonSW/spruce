@@ -8,9 +8,8 @@ import (
 
 // palette is every color the UI uses, in one place. These are base-16 ANSI
 // codes (0–15) rather than xterm-256 shades, so the UI rides the user's own
-// terminal theme — the colors they've already customised — instead of pinning
-// specific hues. The one deliberate exception is the animated "checking" border,
-// which lives in gradPalette as hex because colorful.Hex requires it.
+// terminal theme instead of pinning specific hues. The one exception is the
+// animated "checking" border in gradPalette, which needs hex for colorful.Hex.
 const (
 	// ANSI 0-255 codes
 	colAccent = "13" // bright magenta — the single primary accent: titles, panel
@@ -38,11 +37,9 @@ const (
 	colorPinned  = ""
 )
 
-// gradPalette is the cyclic color loop the loading border sweeps through. The
-// dim unselected-border color dominates so the bright blue/purple/pink accents
-// form a small, compact highlight — a "comet" — that sweeps over a dim base,
-// making the motion read clearly instead of blending into a uniform glow. The
-// run of dim stops keeps the bright arc to a small fraction of the perimeter.
+// gradPalette is the cyclic color loop the loading border sweeps through: a
+// dim base dominates so the bright blue/purple/pink accents read as a small,
+// compact "comet" instead of blending into a uniform glow.
 // mustHex panics only on a bad literal.
 var gradPalette = []colorful.Color{
 	mustHex(dimBorder),

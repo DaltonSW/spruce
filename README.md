@@ -47,7 +47,7 @@ spruce            # show available updates, then confirm to apply
 spruce -y         # apply all available updates without prompting
 spruce --dry-run  # simulate; never mutates the system
 spruce --demo     # fake backends to preview the UI (no system access)
-spruce --help     # styled help; --version, completion also available
+spruce --help     # styled help; --version also available
 ```
 
 Nothing mutates your system until you pass the single confirmation gate on the review screen. `Check` and `Plan` are strictly read-only; only `Apply` makes changes, and backends needing root satisfy it via polkit/snapd — never raw `sudo`.
@@ -88,12 +88,14 @@ Two notes on the language-manager backends:
 
 ```
 main.go                     entrypoint
+cmd/           single fang/cobra command: root → TUI; -y applies immediately
 internal/
-  cli/         single fang/cobra command: root → TUI; -y applies immediately
   core/        the only thing the TUI depends on: Update, Plan, ProgressEvent, Backend
   backend/     one file per manager + registry (runtime discovery, concurrent CheckAll)
   ptyrun/      PTY streaming helper for CLI-wrapped backends (brew, flatpak, go, npm)
   tui/         Bubble Tea v2 model/view: Discovering → Selecting → Reviewing → Applying → Done
+  config/      persisted user preferences (currently just brew ask-mode consent)
+  version/     checks GitHub for a newer release, surfaced in the TUI header
 ```
 
 Command handling uses [`charmbracelet/fang`](https://github.com/charmbracelet/fang)

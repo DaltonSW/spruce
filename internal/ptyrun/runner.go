@@ -1,14 +1,8 @@
 // Package ptyrun runs a child process under a pseudo-terminal and streams its
-// output.
-//
-// This is the crux of wrapping tools that have no API (brew, and any future
-// CLI-wrapped backend). Many CLIs detect whether stdout is a TTY and *change
-// their behavior*: with a real terminal they emit progress bars and color;
-// with a pipe they go quiet. Allocating a PTY makes the tool believe it's
-// interactive, so we get the rich output stream to parse.
-//
-// It also lets us notice the tool going idle — a heuristic that it is blocked
-// on an interactive prompt — so the caller can surface it instead of hanging.
+// output. Many CLIs go quiet on a pipe and only emit rich progress/color when
+// stdout is a TTY, so allocating a PTY gets us the real output to parse. It
+// also notices the tool going idle — a heuristic for an interactive prompt —
+// so the caller can surface it instead of hanging.
 package ptyrun
 
 import (

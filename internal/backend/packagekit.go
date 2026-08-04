@@ -20,29 +20,13 @@ const (
 	pkRootPath = "/org/freedesktop/PackageKit"
 	pkTxIface  = "org.freedesktop.PackageKit.Transaction"
 
-	// pkFlagOnlyTrusted (PK_TRANSACTION_FLAG_ENUM_ONLY_TRUSTED) is REQUIRED for a
-	// real upgrade. Without it PackageKit treats the transaction as installing
-	// UNTRUSTED packages and demands the org.freedesktop.packagekit.
-	// package-install-untrusted polkit authorization, which the standard auth
-	// agent won't grant — so the update fails instantly ("Failed to obtain
-	// authentication"). Every Fedora repo package is GPG-signed, so requiring
-	// trust is correct here; it's the same flag dnf and GNOME Software use, and
-	// it routes to the local-session-granted system-update action instead.
-	//
-	// The wire value is a PkBitfield: the bit index is the enum's (sequential)
-	// value, NOT the enum value itself. PK_TRANSACTION_FLAG_ENUM_ONLY_TRUSTED is
-	// enum 1 (NONE=0, ONLY_TRUSTED=1, SIMULATE=2, ...), so its bit is 1<<1. Using
-	// 1<<0 sends bit 0 (= NONE), which the daemon reads as only_trusted:0 and
-	// rejects with the auth failure above — the exact symptom this once caused.
-	//
-	// We deliberately do NOT add the SIMULATE flag (1<<2) for dry runs: the dnf5
-	// PackageKit backend has been observed to ignore it and apply the transaction
-	// for real, so dry runs never call the mutating UpdatePackages method at all
-	// (see Apply).
+	// PK_TRANSACTION_FLAG_ENUM_ONLY_TRUSTED, required or PackageKit demands
+	// package-install-untrusted polkit auth (which fails instantly). Wire value
+	// is a bitfield indexed by enum value (NONE=0, ONLY_TRUSTED=1, ...), so bit
+	// 1<<1, not 1<<0.
 	pkFlagOnlyTrusted = uint64(1 << 1)
 
-	// Pk filter bitfield, encoded the same way: the filter enum is sequential
-	// (UNKNOWN=0, NONE=1, INSTALLED=2, ...) and the wire value is 1<<enum.
+	// Filter bitfield, same enum-indexed encoding as above.
 	pkFilterInstalled = uint64(1 << 2) // PK_FILTER_ENUM_INSTALLED
 )
 
@@ -318,11 +302,8 @@ func (PackageKit) Apply(ctx context.Context, plan core.Plan) (<-chan core.Progre
 	go func() {
 		defer close(events)
 
-		// Dry run: never enter PackageKit's update path. The SIMULATE flag is not
-		// reliably honoured by the dnf5 backend (it has applied transactions for
-		// real), so we refuse to call the mutating UpdatePackages at all and just
-		// report what would be updated from the already-resolved selection. This
-		// touches nothing on the system — no daemon call, no polkit prompt.
+		// dnf5's SIMULATE flag isn't reliably honored (it has applied for real), so
+		// dry runs skip UpdatePackages entirely rather than trusting it.
 		if plan.DryRun {
 			events <- core.ProgressEvent{Kind: core.EventLog, Source: "system",
 				Text: "(dry run — preview only, PackageKit is not invoked)"}
