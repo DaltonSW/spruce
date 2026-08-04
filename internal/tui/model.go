@@ -4,6 +4,7 @@ package tui
 
 import (
 	"context"
+	"slices"
 	"strconv"
 	"time"
 
@@ -24,6 +25,7 @@ const (
 	stateReviewing
 	stateConfirmInstall
 	stateBrewAsk
+	stateManageBackends
 	stateApplying
 	stateDone
 )
@@ -115,11 +117,16 @@ type Model struct {
 	// panel; navigation is panel-local so a 200-package System list can't bury
 	// the smaller backends.
 	rows       []row
-	discovered []string        // every detected backend, in Available() order; gets a panel even while still checking or empty
+	discovered []string        // detected, non-ignored backends, in Available() order; gets a panel even while still checking or empty
 	checking   map[string]bool // backends whose Check() hasn't returned yet (panel shows a spinner)
 	checkCh    <-chan checkResult
 	selected   map[string]bool // keyed by Update.ID()
 	focus      int             // index into panels()
+
+	// allNames is every detected backend (ignored or not), in Available()
+	// order — drives the manage-backends screen. manageCursor indexes into it.
+	allNames     []string
+	manageCursor int
 
 	// installTarget is the single package to install when in stateConfirmInstall
 	// (the (i) flow). Independent of the m.selected multi-selection.
@@ -428,6 +435,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.keyConfirmInstall(msg)
 	case stateBrewAsk:
 		return m.keyBrewAsk(msg)
+	case stateManageBackends:
+		return m.keyManageBackends(msg)
 	case stateApplying:
 		return m.keyLog(msg)
 	case stateDone:
@@ -592,6 +601,11 @@ func (m Model) keySelecting(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Rescan):
 		if len(m.checking) == 0 {
 			return m.restartChecks()
+		}
+	case key.Matches(msg, m.keys.Manage):
+		m.state = stateManageBackends
+		if m.manageCursor >= len(m.allNames) {
+			m.manageCursor = 0
 		}
 	case key.Matches(msg, m.keys.Up):
 		m.moveInPanel(func(t *table.Model) { t.MoveUp(1) })
@@ -785,6 +799,32 @@ func (m Model) keyBrewAsk(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// keyManageBackends handles the manage-backends screen: move the cursor,
+// toggle the highlighted backend's ignored state, or back out to Selecting.
+func (m Model) keyManageBackends(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Back):
+		m.state = stateSelecting
+	case key.Matches(msg, m.keys.Up):
+		if m.manageCursor > 0 {
+			m.manageCursor--
+		}
+	case key.Matches(msg, m.keys.Down):
+		if m.manageCursor < len(m.allNames)-1 {
+			m.manageCursor++
+		}
+	case key.Matches(msg, m.keys.Toggle):
+		if m.manageCursor >= 0 && m.manageCursor < len(m.allNames) {
+			cmd := m.toggleIgnored(m.allNames[m.manageCursor])
+			return m, cmd
+		}
+	case key.Matches(msg, m.keys.Quit):
+		m.cancel()
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
 // ensureTick restarts the animation loops (gradient border + braille spinner) if
 // they aren't already running — each loop halts itself when nothing is animating,
 // so this is called whenever we re-enter an animating state (e.g. starting an
@@ -804,18 +844,77 @@ func (m *Model) ensureTick() tea.Cmd {
 
 // onAvailable records every detected backend and shows their panels right away
 // (each as a spinner), then kicks off the streaming Check across all of them.
+// Backends the user has ignored (m.cfg.IgnoredBackends) are still recorded in
+// m.allNames/m.byName for the manage-backends screen, but never get a panel
+// or a Check.
 func (m *Model) onAvailable(msg availableMsg) (tea.Model, tea.Cmd) {
+	toCheck := make([]core.Backend, 0, len(msg.backends))
 	for _, b := range msg.backends {
 		name := b.Name()
 		m.byName[name] = b
+		m.allNames = append(m.allNames, name)
+		if m.cfg.IsIgnored(name) {
+			continue
+		}
 		m.discovered = append(m.discovered, name)
 		m.checking[name] = true
+		toCheck = append(toCheck, b)
 	}
 	m.state = stateSelecting
-	if len(msg.backends) == 0 {
-		return *m, nil // nothing detected
+	if len(toCheck) == 0 {
+		return *m, nil // nothing to check (either nothing detected, or all ignored)
 	}
-	return *m, tea.Batch(startCheckCmd(m.ctx, msg.backends), m.ensureTick())
+	return *m, tea.Batch(startCheckCmd(m.ctx, toCheck), m.ensureTick())
+}
+
+// toggleIgnored flips whether name is ignored, persists the choice (skipped
+// in --demo, which has no config to save), and updates the live session:
+// ignoring drops the backend's panel and any in-flight/queued Check right
+// away; un-ignoring restores the panel and (re)runs Check for it.
+func (m *Model) toggleIgnored(name string) tea.Cmd {
+	if name == "" {
+		return nil
+	}
+	if m.cfg.IgnoredBackends == nil {
+		m.cfg.IgnoredBackends = map[string]bool{}
+	}
+
+	if m.cfg.IsIgnored(name) {
+		delete(m.cfg.IgnoredBackends, name)
+		if !slices.Contains(m.discovered, name) {
+			m.discovered = append(m.discovered, name)
+		}
+		cmds := []tea.Cmd{m.ensureTick()}
+		if b, ok := m.byName[name]; ok {
+			m.checking[name] = true
+			cmds = append(cmds, startCheckCmd(m.ctx, []core.Backend{b}))
+		}
+		if !m.demo {
+			cmds = append(cmds, saveConfigCmd(m.cfg))
+		}
+		m.syncAllPanels()
+		return tea.Batch(cmds...)
+	}
+
+	m.cfg.IgnoredBackends[name] = true
+	m.discovered = slices.DeleteFunc(m.discovered, func(s string) bool { return s == name })
+	delete(m.checking, name)
+	delete(m.progress, name)
+	kept := m.rows[:0:0]
+	for _, r := range m.rows {
+		if r.source == name {
+			delete(m.selected, r.update.ID())
+			delete(m.planCache, r.update.ID())
+			continue
+		}
+		kept = append(kept, r)
+	}
+	m.rows = kept
+	m.syncAllPanels()
+	if m.demo {
+		return nil
+	}
+	return saveConfigCmd(m.cfg)
 }
 
 // onChecked folds one backend's Check result into the model as it arrives, so

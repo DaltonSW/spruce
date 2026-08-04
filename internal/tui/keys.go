@@ -36,6 +36,7 @@ type keyMap struct {
 	More         key.Binding
 	Rescan       key.Binding
 	LogFilter    key.Binding
+	Manage       key.Binding
 }
 
 // defaultKeys mirrors the bindings (and footer wording) the TUI used when these
@@ -82,6 +83,7 @@ func defaultKeys() keyMap {
 		More:       key.NewBinding(key.WithKeys("enter", "r"), key.WithHelp("enter", "back to updates")),
 		Rescan:     key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "rescan")),
 		LogFilter:  key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "filter log")),
+		Manage:     key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "manage backends")),
 	}
 }
 
@@ -102,7 +104,7 @@ func (k keyMap) selectingHelp() []helpGroup {
 	return []helpGroup{
 		{"Move", []key.Binding{k.Up, k.Right, k.Jump, k.PageUp, k.Home}},
 		{"Select", []key.Binding{k.Toggle, k.All, k.AllGlobal, k.None, k.NoneGlobal}},
-		{"Do", []key.Binding{k.DryRun, k.Install, k.Review, k.InstallPanel, k.Rescan, k.Quit}},
+		{"Do", []key.Binding{k.DryRun, k.Install, k.Review, k.InstallPanel, k.Rescan, k.Manage, k.Quit}},
 	}
 }
 
@@ -116,6 +118,10 @@ func (k keyMap) confirmInstallHelp() []key.Binding {
 
 func (k keyMap) brewAskHelp() []key.Binding {
 	return []key.Binding{k.Apply, k.Always, k.Back, k.Quit}
+}
+
+func (k keyMap) manageHelp() []key.Binding {
+	return []key.Binding{k.Up, k.Toggle, k.Back, k.Quit}
 }
 
 func (k keyMap) applyingHelp() []key.Binding {

@@ -212,6 +212,8 @@ func (m Model) View() tea.View {
 		body = m.viewConfirmInstall()
 	case stateBrewAsk:
 		body = m.viewBrewAsk()
+	case stateManageBackends:
+		body = m.viewManageBackends()
 	case stateApplying, stateDone:
 		body = m.viewApplying()
 	}
@@ -1197,6 +1199,56 @@ func (m Model) brewAskModal() string {
 		"",
 		helpRow(m.width, m.keys.brewAskHelp()),
 	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left, body...)
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(colAccent)).
+		Padding(1, 3).
+		Render(content)
+}
+
+// viewManageBackends floats the manage-backends screen over the Selecting
+// grid, reusing the review-modal layering.
+func (m Model) viewManageBackends() string {
+	backdrop := m.viewSelecting()
+	modal := m.manageBackendsModal()
+
+	x := max((m.width-lipgloss.Width(modal))/2, 0)
+	y := max((lipgloss.Height(backdrop)-lipgloss.Height(modal))/2, 0)
+
+	bg := lipgloss.NewLayer(backdrop)
+	fg := lipgloss.NewLayer(modal).X(x).Y(y).Z(1)
+	return lipgloss.NewCompositor(bg, fg).Render()
+}
+
+// manageBackendsModal lists every detected backend with its ignored/active
+// state, cursor-highlighted, so the user can opt a backend out of every
+// future check (or bring one back in).
+func (m Model) manageBackendsModal() string {
+	body := []string{
+		titleStyle.Render("Manage backends"),
+		"",
+		dimStyle.Render("Ignored backends are never checked and never get a panel."),
+		"",
+	}
+	if len(m.allNames) == 0 {
+		body = append(body, dimStyle.Render("No backends detected."))
+	}
+	for i, name := range m.allNames {
+		cursor := "  "
+		if i == m.manageCursor {
+			cursor = "▶ "
+		}
+		mark := "[ ] "
+		status := ""
+		if m.cfg.IsIgnored(name) {
+			mark = "[x] "
+			status = dimStyle.Render(" (ignored)")
+		}
+		body = append(body, cursor+mark+m.sourceLabel(name)+status)
+	}
+	body = append(body, "", helpRow(m.width, m.keys.manageHelp()))
 
 	content := lipgloss.JoinVertical(lipgloss.Left, body...)
 	return lipgloss.NewStyle().

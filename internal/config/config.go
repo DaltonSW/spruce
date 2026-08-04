@@ -1,5 +1,6 @@
-// Package config persists spruce's user preferences across runs — currently
-// just the brew ask-mode consent choice. Small enough to keep as one file.
+// Package config persists spruce's user preferences across runs — the brew
+// ask-mode consent choice and which backends the user has opted out of.
+// Small enough to keep as one file.
 package config
 
 import (
@@ -14,6 +15,16 @@ type Config struct {
 	// BrewAutoConfirm means the user chose "don't ask again" when spruce
 	// offered to suppress brew's install/upgrade confirmation prompts.
 	BrewAutoConfirm bool `json:"brew_auto_confirm"`
+	// IgnoredBackends holds backend names (Backend.Name(), e.g. "npm",
+	// "brew") the user has opted out of. An ignored backend is never
+	// checked and never gets a panel.
+	IgnoredBackends map[string]bool `json:"ignored_backends,omitempty"`
+}
+
+// IsIgnored reports whether the named backend has been opted out of. Safe to
+// call on a zero-value Config.
+func (c Config) IsIgnored(name string) bool {
+	return c.IgnoredBackends[name]
 }
 
 // Path returns the config file location: $SPRUCE_CONFIG_FILE if set, else
