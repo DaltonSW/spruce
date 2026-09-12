@@ -7,22 +7,20 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 
 	"go.dalton.dog/spruce/internal/core"
 	"go.dalton.dog/spruce/internal/ptyrun"
 )
 
-// Uv manages user-level Python CLI tools installed via `uv tool install` —
-// isolated venvs on PATH (e.g. ruff, httpie), never project/directory-local
-// dependencies. This is the same niche pipx fills; uv is offered as a
-// separate backend (rather than folded into Pipx) because the two tools are
-// commonly installed side by side and track disjoint sets of packages. Its
-// update list comes straight from `uv tool list --outdated`, and each
-// upgrade is `uv tool upgrade <pkg>` streamed under a PTY.
+// Uv manages CLI tools installed via `uv tool install` (ruff, httpie, etc),
+// the same niche pipx fills. `uv tool list --outdated` is version-gated, so
+// like Pipx the update list comes from `uv tool list` cross-checked against
+// PyPI. Upgrades run `uv tool upgrade <pkg>` under a PTY.
 type Uv struct{}
 
 func (Uv) Name() string  { return "uv" }
-func (Uv) Icon() string  { return "" }       // nf-dev-python
+func (Uv) Icon() string  { return "" }        // nf-dev-python
 func (Uv) Color() string { return "#de5fe9" } // uv's magenta/purple mark
 
 func (Uv) Available() bool {
@@ -35,39 +33,62 @@ func uvEnv() []string {
 	return append(envBase(), "NO_COLOR=1")
 }
 
-// uvOutdatedRe matches the header line of `uv tool list --outdated`, e.g.
-// "ruff v0.5.0 [latest: 0.16.1]". The lines that follow each header (one per
-// exposed executable, "- <name>") carry no version info and are ignored.
-var uvOutdatedRe = regexp.MustCompile(`^(\S+) v(\S+) \[latest: (\S+)\]$`)
+// uvListRe matches a `uv tool list` header line, e.g. "ruff v0.5.0".
+var uvListRe = regexp.MustCompile(`^(\S+) v(\S+)$`)
 
 func (Uv) Check(ctx context.Context) ([]core.Update, error) {
-	cmd := exec.CommandContext(ctx, "uv", "tool", "list", "--outdated", "--color=never")
+	cmd := exec.CommandContext(ctx, "uv", "tool", "list", "--color=never")
 	cmd.Env = uvEnv()
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
 	}
-	return parseUvOutdated(out), nil
-}
 
-func parseUvOutdated(out []byte) []core.Update {
-	var ups []core.Update
+	type installed struct{ name, version string }
+	var pkgs []installed
 	sc := bufio.NewScanner(strings.NewReader(string(out)))
 	for sc.Scan() {
 		line := strings.TrimRight(sc.Text(), "\r")
-		m := uvOutdatedRe.FindStringSubmatch(line)
+		m := uvListRe.FindStringSubmatch(line)
 		if m == nil {
 			continue // an exposed-executable line ("- ruff") or other chatter
 		}
-		ups = append(ups, core.Update{
-			Name:           m[1],
-			CurrentVersion: m[2],
-			NewVersion:     m[3],
-			Source:         "uv",
-			Kind:           "tool",
-		})
+		pkgs = append(pkgs, installed{m[1], m[2]})
 	}
-	return ups
+
+	// Fan out PyPI lookups with a bounded worker pool; order preserved.
+	ups := make([]core.Update, len(pkgs))
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for i, p := range pkgs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, p installed) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			latest := pypiLatestVersion(ctx, p.name)
+			if latest == "" || latest == p.version {
+				return // up to date, or couldn't resolve — offer nothing
+			}
+			ups[i] = core.Update{
+				Name:           p.name,
+				CurrentVersion: p.version,
+				NewVersion:     latest,
+				Source:         "uv",
+				Kind:           "tool",
+			}
+		}(i, p)
+	}
+	wg.Wait()
+
+	// Compact away the slots that produced no update (Name stays "").
+	out2 := ups[:0]
+	for _, u := range ups {
+		if u.Name != "" {
+			out2 = append(out2, u)
+		}
+	}
+	return out2, nil
 }
 
 func (u Uv) Plan(ctx context.Context, selected []core.Update) (core.Plan, error) {
@@ -113,7 +134,7 @@ func (Uv) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, up c
 	events <- core.ProgressEvent{Kind: core.EventPhase, Source: "uv", Item: up.Name, Phase: "Upgrading"}
 
 	argv := []string{"uv", "tool", "upgrade", up.Name, "--color=never", "--no-progress"}
-	chunks, done := ptyrun.Stream(ctx, argv, ptyrun.Options{Env: uvEnv(), IdleTimeoutMS: 15000})
+	chunks, done := ptyrun.Stream(ctx, argv, ptyrun.Options{Env: uvEnv()})
 
 	var carry string
 	emit := func(line string) {
@@ -125,11 +146,6 @@ func (Uv) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, up c
 	}
 
 	for ch := range chunks {
-		if ch.Idle {
-			events <- core.ProgressEvent{Kind: core.EventPrompt, Source: "uv", Item: up.Name,
-				Text: "uv appears to be waiting for input"}
-			continue
-		}
 		carry += ch.Data
 		for {
 			i := strings.IndexByte(carry, '\n')

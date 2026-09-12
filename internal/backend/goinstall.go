@@ -23,7 +23,7 @@ import (
 type Go struct{}
 
 func (Go) Name() string  { return "go" }
-func (Go) Icon() string  { return "" }       // nf-seti-go
+func (Go) Icon() string  { return "" }        // nf-seti-go
 func (Go) Color() string { return "#00add8" } // gopher cyan — the Go brand
 
 func (Go) Available() bool {
@@ -227,7 +227,7 @@ func (g Go) runInstall(ctx context.Context, events chan<- core.ProgressEvent, u 
 	events <- core.ProgressEvent{Kind: core.EventPhase, Source: "go", Item: u.Name, Phase: "Installing"}
 
 	argv := []string{"go", "install", target + "@latest"}
-	chunks, done := ptyrun.Stream(ctx, argv, ptyrun.Options{Env: goEnv(), IdleTimeoutMS: 15000})
+	chunks, done := ptyrun.Stream(ctx, argv, ptyrun.Options{Env: goEnv()})
 
 	var carry string
 	emit := func(line string) {
@@ -239,11 +239,6 @@ func (g Go) runInstall(ctx context.Context, events chan<- core.ProgressEvent, u 
 	}
 
 	for ch := range chunks {
-		if ch.Idle {
-			events <- core.ProgressEvent{Kind: core.EventPrompt, Source: "go", Item: u.Name,
-				Text: "go install appears to be waiting for input"}
-			continue
-		}
 		carry += ch.Data
 		for {
 			i := strings.IndexByte(carry, '\n')

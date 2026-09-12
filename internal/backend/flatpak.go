@@ -16,7 +16,7 @@ import (
 type Flatpak struct{}
 
 func (Flatpak) Name() string  { return "flatpak" }
-func (Flatpak) Icon() string  { return "" }       // nf-fa-cube
+func (Flatpak) Icon() string  { return "" }        // nf-fa-cube
 func (Flatpak) Color() string { return "#4a90d9" } // blue — the Flatpak brand
 
 func (Flatpak) Available() bool {
@@ -199,7 +199,7 @@ func (f Flatpak) runUpdate(ctx context.Context, events chan<- core.ProgressEvent
 
 	events <- core.ProgressEvent{Kind: core.EventPhase, Source: "flatpak", Item: u.Name, Phase: "Updating"}
 
-	chunks, done := ptyrun.Stream(ctx, argv, ptyrun.Options{Env: envBase(), IdleTimeoutMS: 5000})
+	chunks, done := ptyrun.Stream(ctx, argv, ptyrun.Options{Env: envBase()})
 
 	var carry string
 	emit := func(line string) {
@@ -214,11 +214,6 @@ func (f Flatpak) runUpdate(ctx context.Context, events chan<- core.ProgressEvent
 	}
 
 	for ch := range chunks {
-		if ch.Idle {
-			events <- core.ProgressEvent{Kind: core.EventPrompt, Source: "flatpak", Item: u.Name,
-				Text: "flatpak appears to be waiting for input"}
-			continue
-		}
 		carry += ch.Data
 		for {
 			i := strings.IndexByte(carry, '\n')

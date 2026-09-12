@@ -24,7 +24,7 @@ import (
 type Pipx struct{}
 
 func (Pipx) Name() string  { return "pipx" }
-func (Pipx) Icon() string  { return "" }       // nf-dev-python
+func (Pipx) Icon() string  { return "" }        // nf-dev-python
 func (Pipx) Color() string { return "#ffd43b" } // Python yellow
 
 func (Pipx) Available() bool {
@@ -218,7 +218,7 @@ func (Pipx) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, u 
 	events <- core.ProgressEvent{Kind: core.EventPhase, Source: "pipx", Item: u.Name, Phase: "Upgrading"}
 
 	argv := []string{"pipx", "upgrade", u.Name}
-	chunks, done := ptyrun.Stream(ctx, argv, ptyrun.Options{Env: pipxEnv(), IdleTimeoutMS: 15000})
+	chunks, done := ptyrun.Stream(ctx, argv, ptyrun.Options{Env: pipxEnv()})
 
 	var carry string
 	emit := func(line string) {
@@ -230,11 +230,6 @@ func (Pipx) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, u 
 	}
 
 	for ch := range chunks {
-		if ch.Idle {
-			events <- core.ProgressEvent{Kind: core.EventPrompt, Source: "pipx", Item: u.Name,
-				Text: "pipx appears to be waiting for input"}
-			continue
-		}
 		// pipx's own spinner (independent of uv's, which UV_NO_PROGRESS already
 		// silences) wraps the whole run in a cursor hide/show pair — strip those
 		// two control sequences so they never reach the log pane.

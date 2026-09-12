@@ -22,7 +22,7 @@ import (
 type Npm struct{}
 
 func (Npm) Name() string  { return "npm" }
-func (Npm) Icon() string  { return "" }       // nf-dev-npm
+func (Npm) Icon() string  { return "" }        // nf-dev-npm
 func (Npm) Color() string { return "#cb3837" } // npm red
 
 func (Npm) Available() bool {
@@ -195,7 +195,7 @@ func (Npm) runInstall(ctx context.Context, events chan<- core.ProgressEvent, u c
 	if dryRun {
 		argv = append(argv, "--dry-run")
 	}
-	chunks, done := ptyrun.Stream(ctx, argv, ptyrun.Options{Env: npmEnv(), IdleTimeoutMS: 12000})
+	chunks, done := ptyrun.Stream(ctx, argv, ptyrun.Options{Env: npmEnv()})
 
 	var carry string
 	emit := func(line string) {
@@ -207,11 +207,6 @@ func (Npm) runInstall(ctx context.Context, events chan<- core.ProgressEvent, u c
 	}
 
 	for ch := range chunks {
-		if ch.Idle {
-			events <- core.ProgressEvent{Kind: core.EventPrompt, Source: "npm", Item: u.Name,
-				Text: "npm appears to be waiting for input"}
-			continue
-		}
 		carry += ch.Data
 		for {
 			i := strings.IndexByte(carry, '\n')

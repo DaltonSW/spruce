@@ -1,8 +1,6 @@
 // Package ptyrun runs a child process under a pseudo-terminal and streams its
 // output. Many CLIs go quiet on a pipe and only emit rich progress/color when
-// stdout is a TTY, so allocating a PTY gets us the real output to parse. It
-// also notices the tool going idle — a heuristic for an interactive prompt —
-// so the caller can surface it instead of hanging.
+// stdout is a TTY, so allocating a PTY gets us the real output to parse.
 package ptyrun
 
 import (
@@ -10,45 +8,19 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
-	"time"
 
 	"github.com/creack/pty"
 )
 
-// newIdleTimer returns a reset func and a channel that fires after ms
-// milliseconds of inactivity. reset must only be called from a single
-// goroutine (the Stream coordinator), so draining the timer channel here is
-// race-free against the coordinator's select.
-func newIdleTimer(ms int) (func(), <-chan time.Time) {
-	d := time.Duration(ms) * time.Millisecond
-	t := time.NewTimer(d)
-	reset := func() {
-		if !t.Stop() {
-			select {
-			case <-t.C:
-			default:
-			}
-		}
-		t.Reset(d)
-	}
-	return reset, t.C
-}
-
-// Chunk is a piece of child output, or an idle tick.
+// Chunk is a piece of child output.
 type Chunk struct {
 	Data string
-	// Idle is true when no output arrived within IdleTimeout and the child is
-	// still running — a likely interactive prompt.
-	Idle bool
 }
 
 // Options configures a Stream run.
 type Options struct {
 	Env []string // full environment for the child (defaults to os.Environ)
 	Dir string   // working directory, optional
-	// IdleTimeout: if >0, emit an Idle chunk after this many milliseconds of
-	// silence while the child is still alive.
-	IdleTimeoutMS int
 }
 
 // Stream spawns argv under a PTY and returns a channel of output chunks plus an
@@ -106,7 +78,7 @@ func Stream(ctx context.Context, argv []string, opts Options) (<-chan Chunk, <-c
 	}
 
 	// Reader goroutine: pump raw PTY output onto an internal channel so the
-	// coordinator can multiplex it against an idle timer and ctx.
+	// coordinator can multiplex it against ctx.
 	raw := make(chan string, 32)
 	go func() {
 		defer close(raw)
@@ -130,13 +102,6 @@ func Stream(ctx context.Context, argv []string, opts Options) (<-chan Chunk, <-c
 			_ = devNull.Close()
 		}()
 
-		var idle <-chan time.Time
-		resetIdle := func() {}
-		if opts.IdleTimeoutMS > 0 {
-			resetIdle, idle = newIdleTimer(opts.IdleTimeoutMS)
-			resetIdle()
-		}
-
 		for {
 			select {
 			case <-ctx.Done():
@@ -149,11 +114,7 @@ func Stream(ctx context.Context, argv []string, opts Options) (<-chan Chunk, <-c
 				if !ok {
 					return
 				}
-				resetIdle()
 				chunks <- Chunk{Data: s}
-			case <-idle:
-				chunks <- Chunk{Idle: true}
-				resetIdle()
 			}
 		}
 	}()

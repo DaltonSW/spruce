@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"go.dalton.dog/spruce/internal/core"
@@ -16,7 +18,7 @@ import (
 type Brew struct{}
 
 func (Brew) Name() string  { return "brew" }
-func (Brew) Icon() string  { return "" }       // nf-fa-beer
+func (Brew) Icon() string  { return "" }        // nf-fa-beer
 func (Brew) Color() string { return "#f6b552" } // amber — the Homebrew mug
 
 func (Brew) Available() bool {
@@ -216,6 +218,22 @@ func parseBrewUpgrades(out string) []string {
 	return lines
 }
 
+// brewPercentRe matches brew's download meter, e.g. "###   64.2%".
+var brewPercentRe = regexp.MustCompile(`(\d+(?:\.\d+)?)%\s*$`)
+
+// brewDownloadPercent returns the meter's percentage as a 0-1 fraction.
+func brewDownloadPercent(line string) (float64, bool) {
+	m := brewPercentRe.FindStringSubmatch(line)
+	if m == nil {
+		return 0, false
+	}
+	pct, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return 0, false
+	}
+	return pct / 100, true
+}
+
 func (b Brew) Apply(ctx context.Context, plan core.Plan) (<-chan core.ProgressEvent, error) {
 	events := make(chan core.ProgressEvent, 64)
 
@@ -262,7 +280,7 @@ func (b Brew) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, 
 	if autoConfirm {
 		env = append(env, "HOMEBREW_NO_ASK=1")
 	}
-	chunks, done := ptyrun.Stream(ctx, argv, ptyrun.Options{Env: env, IdleTimeoutMS: 4000})
+	chunks, done := ptyrun.Stream(ctx, argv, ptyrun.Options{Env: env})
 
 	var carry string
 	emit := func(line string) {
@@ -280,21 +298,24 @@ func (b Brew) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, 
 	}
 
 	for ch := range chunks {
-		if ch.Idle {
-			// Non-interactive flags mean we shouldn't be at a prompt; surface
-			// it rather than hang silently.
-			events <- core.ProgressEvent{Kind: core.EventPrompt, Source: "brew", Item: u.Name,
-				Text: "brew appears to be waiting for input"}
-			continue
-		}
-		carry += ch.Data
+		data := ch.Data
 		for {
-			i := strings.IndexByte(carry, '\n')
+			// Brew redraws its download meter in place via '\r'; parse it as
+			// progress and drop it instead of spamming EventLog.
+			i := strings.IndexAny(data, "\r\n")
 			if i < 0 {
+				carry += data
 				break
 			}
-			emit(carry[:i])
-			carry = carry[i+1:]
+			carry += data[:i]
+			nl := data[i] == '\n'
+			data = data[i+1:]
+			if nl {
+				emit(carry)
+			} else if pct, ok := brewDownloadPercent(carry); ok {
+				events <- core.ProgressEvent{Kind: core.EventProgress, Source: "brew", Item: u.Name, Fraction: pct}
+			}
+			carry = ""
 		}
 	}
 	emit(carry)

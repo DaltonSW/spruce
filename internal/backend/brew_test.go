@@ -27,6 +27,25 @@ func TestParseBrewUpgrades(t *testing.T) {
 	}
 }
 
+func TestBrewDownloadPercent(t *testing.T) {
+	cases := []struct {
+		in     string
+		want   float64
+		wantOK bool
+	}{
+		{"######################################################################## 100.0%", 1.0, true},
+		{"###########                                                              14.7%", 0.147, true},
+		{"==> Downloading https://ghcr.io/v2/homebrew/core/acl/blobs/sha256:abc", 0, false},
+		{"", 0, false},
+	}
+	for _, c := range cases {
+		got, ok := brewDownloadPercent(c.in)
+		if ok != c.wantOK || (ok && got != c.want) {
+			t.Errorf("brewDownloadPercent(%q) = (%v, %v), want (%v, %v)", c.in, got, ok, c.want, c.wantOK)
+		}
+	}
+}
+
 // A run with nothing to do (or no recognizable block) yields no lines, so Plan
 // adds no notes.
 func TestParseBrewUpgradesEmpty(t *testing.T) {
