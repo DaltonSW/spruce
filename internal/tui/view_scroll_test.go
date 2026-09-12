@@ -26,7 +26,8 @@ func gridModel(counts map[string]int) Model {
 	if len(bannerLines) > 0 && bannerWidth <= m.width {
 		bh = len(bannerLines)
 	}
-	m.height = bh + 23 // 8bitfortress: 7+23=30; ember: 9+23=32
+	bh += 2            // header border
+	m.height = bh + 23 // 8bitfortress: 9+23=32; ember: 11+23=34
 	for _, src := range []string{"system", "brew", "flatpak", "snap"} {
 		n, ok := counts[src]
 		if !ok {
@@ -73,7 +74,7 @@ func TestSelectingFitsTerminal(t *testing.T) {
 	for _, cur := range []int{0, 100, 219} {
 		m.tableFor("system").SetCursor(cur)
 		m.syncTable("system")
-		full := m.headerView(m.width) + "\n\n" + m.viewSelecting() // mirrors View()'s wrapper
+		full := m.viewSelecting() // header now tiles into the grid
 
 		lines := strings.Split(full, "\n")
 		if len(lines) > m.height {
@@ -153,7 +154,7 @@ func TestStackedLayout(t *testing.T) {
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 50, Height: 40})
 	m = updated.(Model)
 
-	full := m.headerView(m.width) + "\n\n" + m.viewSelecting()
+	full := m.viewSelecting()
 	lines := strings.Split(full, "\n")
 	if len(lines) > m.height {
 		t.Errorf("%d lines exceeds height %d", len(lines), m.height)
@@ -341,7 +342,7 @@ func TestReviewModal(t *testing.T) {
 		t.Errorf("modal should summarize the total across managers:\n%s", modal)
 	}
 
-	full := m.headerView(m.width) + "\n\n" + m.viewReviewing()
+	full := m.viewReviewing()
 	lines := strings.Split(full, "\n")
 	if len(lines) > m.height {
 		t.Errorf("composited review is %d lines, exceeds height %d", len(lines), m.height)
@@ -450,7 +451,7 @@ func TestApplyPanelListsPackages(t *testing.T) {
 	}
 
 	// Must still fit the terminal.
-	full := m.headerView(m.width) + "\n\n" + body
+	full := body
 	for i, ln := range strings.Split(full, "\n") {
 		if w := lipgloss.Width(ln); w > m.width {
 			t.Errorf("apply line %d width %d exceeds %d: %q", i, w, m.width, ln)
@@ -554,7 +555,7 @@ func TestSizeAndTimingDisplay(t *testing.T) {
 	// narrow two-panel size where the footer cluster and active note must shrink.
 	for _, w := range []int{160, 74} {
 		m.width = w
-		for i, ln := range strings.Split(m.headerView(m.width)+"\n\n"+m.viewApplying(), "\n") {
+		for i, ln := range strings.Split(m.viewApplying(), "\n") {
 			if lw := lipgloss.Width(ln); lw > m.width {
 				t.Errorf("w=%d apply line %d width %d exceeds %d: %q", w, i, lw, m.width, ln)
 			}
@@ -657,7 +658,7 @@ func TestColumnLayout(t *testing.T) {
 	m.width, m.height = 200, 40
 	m.syncAllPanels()
 
-	full := m.headerView(m.width) + "\n\n" + m.viewSelecting()
+	full := m.viewSelecting()
 	lines := strings.Split(full, "\n")
 	if len(lines) > m.height {
 		t.Errorf("%d lines exceeds height %d", len(lines), m.height)
@@ -673,20 +674,25 @@ func TestColumnLayout(t *testing.T) {
 		}
 	}
 
-	// System (left column) and the first small backend (right column) are drawn
-	// side by side, so their header lines land on the same output line. The small
-	// backends stack within the right column, so no two of them share a line.
-	sideBySide := false
-	for _, ln := range lines {
-		if strings.Contains(ln, "SYSTEM") && strings.Contains(ln, "BREW") {
-			sideBySide = true
+	// Brew (right column) rises above system's header line to fill the space
+	// beside the tiled-in logo. Small backends still stack, not share a line.
+	sysLine, brewLine := -1, -1
+	for i, ln := range lines {
+		if sysLine < 0 && strings.Contains(ln, "SYSTEM") {
+			sysLine = i
+		}
+		if brewLine < 0 && strings.Contains(ln, "BREW") {
+			brewLine = i
 		}
 		if strings.Contains(ln, "BREW") && strings.Contains(ln, "FLATPAK") {
 			t.Errorf("small backends should stack, not share a line:\n%s", ln)
 		}
 	}
-	if !sideBySide {
-		t.Errorf("system and the right column should sit side by side:\n%s", full)
+	if sysLine < 0 || brewLine < 0 {
+		t.Fatalf("expected both SYSTEM and BREW header lines, got sysLine=%d brewLine=%d", sysLine, brewLine)
+	}
+	if brewLine >= sysLine {
+		t.Errorf("brew should tile up above system's header line, got brewLine=%d sysLine=%d", brewLine, sysLine)
 	}
 
 	// The system panel is a column, roughly half the width — not the full terminal.

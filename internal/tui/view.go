@@ -12,6 +12,7 @@ import (
 	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/dustin/go-humanize"
 	colorful "github.com/lucasb-eyer/go-colorful"
 	"github.com/superstarryeyes/bit/ansifonts"
@@ -159,13 +160,8 @@ func gradientText(s string) string {
 	return b.String()
 }
 
-// footerNotice returns the text to show at the bottom-right of the screen,
-// opposite the help keys: the build version (always), and when a newer
-// release was found, a one-line "update available" hint above it. The version
-// line carries the same left-to-right gradient as the banner so it reads as a
-// brand accent rather than plain dim text. Returns "" when there is nothing
-// to show (no version and no update).
-func (m Model) footerNotice() string {
+// versionNotice is the version/update-available text shown below the logo.
+func (m Model) versionNotice() string {
 	var lines []string
 	if m.updateVer != nil && m.updateVer.Available {
 		lines = append(lines, dimStyle.Render("↑ spruce "+m.updateVer.Latest+" is available"))
@@ -179,24 +175,70 @@ func (m Model) footerNotice() string {
 	return strings.Join(lines, "\n")
 }
 
-// headerView positions the header in the empty space above the body: one blank
-// line of top padding, with the content horizontally centered across the width.
-func (m Model) headerView(width int) string {
-	c := headerContent(width)
-	if width > 0 {
-		c = lipgloss.PlaceHorizontal(width, lipgloss.Center, c)
+// firstColumnWidth is the first panel column's bordered width.
+func (m Model) firstColumnWidth() int {
+	cols := m.currentLayout()
+	if len(cols) > 0 && len(cols[0].boxes) > 0 {
+		return cols[0].boxes[0].w
 	}
-	return "\n" + c
+	return max(m.width, 1)
 }
 
-// headerHeight is the number of content lines headerView(width) produces (the
-// banner or the plain title), not counting the top-padding line, so the layout
-// below can reserve the right amount of vertical space.
-func (m Model) headerHeight(width int) int {
-	if len(bannerLines) == 0 || bannerWidth > width {
-		return 1
+// headerNoticeLines is versionNotice, truncated to fit innerW.
+func (m Model) headerNoticeLines(innerW int) []string {
+	notice := m.versionNotice()
+	if notice == "" {
+		return nil
 	}
-	return len(bannerLines)
+	lines := strings.Split(notice, "\n")
+	for i, ln := range lines {
+		lines[i] = ansi.Truncate(ln, innerW, "…")
+	}
+	return lines
+}
+
+// centerLine pads ln to width w, centered.
+func centerLine(ln string, w int) string {
+	pad := max(w-lipgloss.Width(ln), 0)
+	left := pad / 2
+	return strings.Repeat(" ", left) + ln + strings.Repeat(" ", pad-left)
+}
+
+// headerBox renders the logo (plus version notice) in a bordered box the
+// width of the first panel column, so it reads as one more panel.
+func (m Model) headerBox() string {
+	colW := m.firstColumnWidth()
+	innerW := max(colW-2, 4)
+
+	content := headerContent(innerW)
+	lines := strings.Split(content, "\n")
+	for i, ln := range lines {
+		lines[i] = centerLine(ln, innerW)
+	}
+	for _, ln := range m.headerNoticeLines(innerW) {
+		lines = append(lines, centerLine(ln, innerW))
+	}
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(colAccent)).
+		Render(strings.Join(lines, "\n"))
+}
+
+// headerView is headerBox with a blank top-padding line, for screens with no
+// panel grid to tile it into.
+func (m Model) headerView() string {
+	return "\n" + m.headerBox()
+}
+
+// headerHeight is headerBox(width)'s bordered height.
+func (m Model) headerHeight(width int) int {
+	innerW := max(width-2, 4)
+	contentH := 1
+	if len(bannerLines) > 0 && bannerWidth <= innerW {
+		contentH = len(bannerLines)
+	}
+	return contentH + len(m.headerNoticeLines(innerW)) + 2 // + border
 }
 
 func (m Model) View() tea.View {
@@ -218,26 +260,13 @@ func (m Model) View() tea.View {
 		body = m.viewApplying()
 	}
 
-	main := m.headerView(m.width) + "\n\n" + body
-
-	bg := lipgloss.NewLayer(main)
-
-	layers := []*lipgloss.Layer{bg}
-
-	// Overlay the version / update-available notice at the bottom-right of the
-	// screen, opposite the help keys. Composited as a top-most layer so it
-	// floats over whatever the body rendered there.
-	if notice := m.footerNotice(); notice != "" && m.width > 0 && m.height > 0 {
-		nw := lipgloss.Width(notice)
-		nh := lipgloss.Height(notice)
-		x := max(m.width-nw, 0)
-		y := max(m.height-nh, 0)
-		layers = append(layers, lipgloss.NewLayer(notice).X(x).Y(y).Z(1))
+	// Discovering has no grid to tile the header into yet.
+	main := body
+	if m.state == stateDiscovering {
+		main = m.headerView() + "\n\n" + body
 	}
 
-	rendered := lipgloss.NewCompositor(layers...).Render()
-
-	v := tea.NewView(rendered)
+	v := tea.NewView(main)
 	v.AltScreen = true
 	v.BackgroundColor = lipgloss.Color(background)
 	return v
@@ -258,7 +287,7 @@ func (m Model) viewSelecting() string {
 	if m.focus >= 0 && m.focus < len(ps) {
 		focusedSrc = ps[m.focus]
 	}
-	grid := m.renderColumns(m.selectLayout(), func(box panelBox) string {
+	grid := m.renderColumns(m.selectLayout(), m.headerBox(), func(box panelBox) string {
 		return m.renderPanel(box.src, box.w, box.h, box.index, box.src == focusedSrc)
 	})
 
@@ -329,9 +358,9 @@ func (m Model) sourceRows(src string) []row {
 }
 
 // selectAvailHeight is the height available to the panel grid, after the
-// header block and the count/help lines below it (status line + 3-row footer).
+// status line and 3-row help footer below it.
 func (m Model) selectAvailHeight() int {
-	return max(m.height-m.headerHeight(m.width)-6, 6)
+	return max(m.height-4, 6)
 }
 
 // minStackPanelH is the floor a panel can shrink to: a border (2) plus a header
@@ -554,11 +583,21 @@ func (m Model) columnLayout(sources []string, content []int, packAvailH, fitAvai
 		content = remeasure(colW)
 	}
 
-	// Greedy balance: place each panel into the shortest column so far.
+	// headerH is what the header box tiled above column 0 costs there.
+	headerH := m.headerHeight(colW)
+
+	// Greedy balance: place each panel into the shortest column so far. The
+	// first source always seeds column 0, since the header tiles above it.
 	naturals := naturalsOf(content, floor)
 	members := make([][]int, cols)
 	colHeight := make([]int, cols)
-	for i := range sources {
+	start := 0
+	if len(sources) > 0 {
+		members[0] = append(members[0], 0)
+		colHeight[0] = headerH + naturals[0]
+		start = 1
+	}
+	for i := start; i < len(sources); i++ {
 		best := 0
 		for c := 1; c < cols; c++ {
 			if colHeight[c] < colHeight[best] {
@@ -571,6 +610,7 @@ func (m Model) columnLayout(sources []string, content []int, packAvailH, fitAvai
 
 	// Fit each column's panels to the height independently, reusing the 1-D drain
 	// so an over-tall column shrinks its biggest panel (the system list) first.
+	// Column 0's budget is reduced by headerH.
 	columns := make([]column, cols)
 	for c := range members {
 		idxs := members[c]
@@ -578,7 +618,11 @@ func (m Model) columnLayout(sources []string, content []int, packAvailH, fitAvai
 		for k, i := range idxs {
 			cont[k] = content[i]
 		}
-		heights := panelLayout(cont, fitAvailH, floor)
+		budget := fitAvailH
+		if c == 0 {
+			budget = max(fitAvailH-headerH, floor)
+		}
+		heights := panelLayout(cont, budget, floor)
 		boxes := make([]panelBox, len(idxs))
 		for k, i := range idxs {
 			boxes[k] = panelBox{src: sources[i], w: colW, h: heights[k], index: i + 1}
@@ -975,17 +1019,21 @@ func dimColor(hex string) string {
 // renderColumns draws the column layout: each column is a vertical stack of
 // panels, and the columns are joined side by side (top-aligned) with a blank gap
 // column between them. A shorter column is padded below by the horizontal join,
-// so the app canvas shows through beneath it.
-func (m Model) renderColumns(cols []column, render func(box panelBox) string) string {
+// so the app canvas shows through beneath it. header, when non-empty, is
+// stacked above column 0's panels.
+func (m Model) renderColumns(cols []column, header string, render func(box panelBox) string) string {
 	gapCol := strings.Repeat(" ", colGap)
 	parts := make([]string, 0, len(cols)*2-1)
 	for ci, col := range cols {
 		if ci > 0 {
 			parts = append(parts, gapCol)
 		}
-		boxes := make([]string, len(col.boxes))
-		for j, b := range col.boxes {
-			boxes[j] = render(b)
+		boxes := make([]string, 0, len(col.boxes)+1)
+		if ci == 0 && header != "" {
+			boxes = append(boxes, header)
+		}
+		for _, b := range col.boxes {
+			boxes = append(boxes, render(b))
 		}
 		parts = append(parts, lipgloss.JoinVertical(lipgloss.Left, boxes...))
 	}
@@ -1415,7 +1463,7 @@ func (m Model) viewApplying() string {
 	// Each apply panel is sized to the number of packages it's applying, plus
 	// room for the full (wrapped) error text when that backend has failed — a
 	// failed backend is forced full-width (applyLayout) so the reason isn't buried.
-	grid := m.renderColumns(m.applyLayout(), func(box panelBox) string {
+	grid := m.renderColumns(m.applyLayout(), m.headerBox(), func(box panelBox) string {
 		return m.renderApplyPanel(box.src, box.w, box.h, box.index)
 	})
 
