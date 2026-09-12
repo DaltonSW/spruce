@@ -20,7 +20,7 @@ import (
 type Uv struct{}
 
 func (Uv) Name() string  { return "uv" }
-func (Uv) Icon() string  { return "" }        // nf-dev-python
+func (Uv) Icon() string  { return "" }       // nf-dev-python
 func (Uv) Color() string { return "#de5fe9" } // uv's magenta/purple mark
 
 func (Uv) Available() bool {
@@ -92,8 +92,6 @@ func (Uv) Check(ctx context.Context) ([]core.Update, error) {
 }
 
 func (u Uv) Plan(ctx context.Context, selected []core.Update) (core.Plan, error) {
-	// `uv tool upgrade` writes to the user's uv tool dir (~/.local/share/uv/tools)
-	// — no root, no dependency preview.
 	return core.Plan{Backend: u.Name(), Selected: selected, NeedsRoot: false}, nil
 }
 
@@ -104,9 +102,8 @@ func (u Uv) Apply(ctx context.Context, plan core.Plan) (<-chan core.ProgressEven
 		defer close(events)
 
 		if plan.DryRun {
-			// `uv tool upgrade` has no dry-run flag, so we must never invoke it
-			// here — report what would run and stop. (Same discipline as
-			// goinstall.go and pipx.go.)
+			// `uv tool upgrade` has no dry-run flag, so never invoke it here —
+			// report what would run and stop.
 			for _, up := range plan.Selected {
 				events <- core.ProgressEvent{Kind: core.EventLog, Source: "uv",
 					Text: fmt.Sprintf("(dry run — would run: uv tool upgrade %s)", up.Name)}
@@ -124,12 +121,10 @@ func (u Uv) Apply(ctx context.Context, plan core.Plan) (<-chan core.ProgressEven
 	return events, nil
 }
 
-// runUpgrade streams one `uv tool upgrade <pkg>`, translating its output lines
-// into structured events. A tool installed with an explicit version
-// specifier (e.g. `uv tool install ruff==0.5.0`) is pinned in uv's own sense
-// and uv declines the upgrade with an explanatory line rather than erroring —
-// that line surfaces to the user as a normal log entry, same as any other uv
-// output.
+// runUpgrade streams one `uv tool upgrade <pkg>`. A tool pinned to an
+// explicit version (`uv tool install ruff==0.5.0`) makes uv decline with an
+// explanatory line rather than erroring; that line surfaces as a normal log
+// entry.
 func (Uv) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, up core.Update) {
 	events <- core.ProgressEvent{Kind: core.EventPhase, Source: "uv", Item: up.Name, Phase: "Upgrading"}
 

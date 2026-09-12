@@ -18,7 +18,7 @@ import (
 type Brew struct{}
 
 func (Brew) Name() string  { return "brew" }
-func (Brew) Icon() string  { return "" }        // nf-fa-beer
+func (Brew) Icon() string  { return "" }       // nf-fa-beer
 func (Brew) Color() string { return "#f6b552" } // amber — the Homebrew mug
 
 func (Brew) Available() bool {
@@ -79,11 +79,9 @@ func (Brew) Check(ctx context.Context) ([]core.Update, error) {
 		})
 	}
 	if len(od.Casks) > 0 {
-		// `brew outdated` only reports a cask's bare token, never its tap. If
-		// two taps ship a cask with the same token, `brew upgrade --cask
-		// <token>` can resolve against the wrong one. Tap-qualify using the
-		// installed-cask inventory (no name-resolution ambiguity there);
-		// best-effort — a lookup miss just falls back to the bare token.
+		// `brew outdated` reports only a cask's bare token, which is ambiguous
+		// across taps; tap-qualify via the installed-cask inventory, falling
+		// back to the bare token on a lookup miss.
 		fullTokens := brewCaskFullTokens(ctx)
 		for _, c := range od.Casks {
 			name := c.Name
@@ -102,10 +100,8 @@ func (Brew) Check(ctx context.Context) ([]core.Update, error) {
 	return ups, nil
 }
 
-// brewCaskFullTokens maps every installed cask's bare token to its
-// tap-qualified full token (e.g. "daltonsw/tap/campfire"; core-tap casks map
-// to themselves). Best-effort: a failure yields an empty map, and callers
-// fall back to the bare token.
+// brewCaskFullTokens maps installed casks' bare tokens to their tap-qualified
+// full tokens. Best-effort: a failure yields a nil map.
 func brewCaskFullTokens(ctx context.Context) map[string]string {
 	cmd := exec.CommandContext(ctx, "brew", "info", "--json=v2", "--cask", "--installed")
 	cmd.Env = brewEnv()
@@ -132,15 +128,11 @@ func brewCaskFullTokens(ctx context.Context) map[string]string {
 }
 
 func (b Brew) Plan(ctx context.Context, selected []core.Update) (core.Plan, error) {
-	// brew doesn't expose reliable download sizes up front; the review screen
-	// shows the item list and we leave DownloadBytes unknown.
 	plan := core.Plan{Backend: b.Name(), Selected: selected, NeedsRoot: false}
 
-	// brew upgrade of a formula also upgrades any *outdated formulae that depend
-	// on it* (e.g. naming `acl` pulls in `vim`). The only reliable way to learn
-	// that full set is to ask brew itself via --dry-run — we never recompute its
-	// resolver. Anything it would touch that the user didn't explicitly pick is
-	// surfaced as a Note so the review/confirm screens can warn before applying.
+	// Upgrading a formula also pulls in any outdated dependents (e.g. `acl`
+	// pulls in `vim`). Ask brew via --dry-run rather than recompute its
+	// resolver, and surface anything unrequested as a Note before applying.
 	requested := map[string]bool{}
 	var formulae, casks []string
 	for _, u := range selected {
@@ -182,10 +174,9 @@ func (b Brew) Plan(ctx context.Context, selected []core.Update) (core.Plan, erro
 	return plan, nil
 }
 
-// brewDryRunUpgrades runs `brew upgrade --dry-run …` and returns each package
-// listed under "Would upgrade N outdated packages", normalized to a single
-// "name old -> new (size)" line. Best-effort: a non-zero exit or unparseable
-// chatter (tap-trust notices, download lines) is tolerated and skipped.
+// brewDryRunUpgrades runs `brew upgrade --dry-run …` and returns each listed
+// package as a "name old -> new (size)" line. Best-effort: errors and
+// unparseable chatter are skipped.
 func brewDryRunUpgrades(ctx context.Context, argv []string) []string {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Env = brewEnv()
@@ -193,11 +184,9 @@ func brewDryRunUpgrades(ctx context.Context, argv []string) []string {
 	return parseBrewUpgrades(string(out))
 }
 
-// parseBrewUpgrades extracts the package lines from `brew upgrade --dry-run`
-// output — everything under "==> Would upgrade N outdated packages" up to the
-// next blank line or header — normalized to single-spaced "name old -> new
-// (size)" lines. All the surrounding chatter (tap-trust notices, download
-// progress) is ignored.
+// parseBrewUpgrades extracts the package lines under "==> Would upgrade N
+// outdated packages" from `brew upgrade --dry-run` output, normalized to
+// single-spaced lines.
 func parseBrewUpgrades(out string) []string {
 	var lines []string
 	inBlock := false
@@ -255,15 +244,13 @@ func (b Brew) Apply(ctx context.Context, plan core.Plan) (<-chan core.ProgressEv
 	return events, nil
 }
 
-// runUpgrade streams a single `brew upgrade <name>` (or `--cask <name>`),
-// translating output lines into structured events. One package per invocation
-// (rather than batching the whole selection) bounds brew's silent pre-flight
-// to a single package and lets us announce the active item up front.
+// runUpgrade streams a single `brew upgrade <name>` (or `--cask <name>`). One
+// package per invocation bounds brew's silent pre-flight and lets us announce
+// the active item up front.
 //
-// autoConfirm suppresses brew's "ask mode" confirmation prompt (consent
-// secured by the TUI's own gate); without it, stdin is pinned to /dev/null
-// over the PTY, so brew reads an unanswered prompt as EOF and declines rather
-// than hanging.
+// autoConfirm suppresses brew's "ask mode" prompt (consent already secured by
+// the TUI's gate); otherwise stdin is /dev/null over the PTY, so an unanswered
+// prompt reads as EOF and brew declines rather than hanging.
 func (b Brew) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, u core.Update, dryRun, autoConfirm bool) {
 	argv := []string{"brew", "upgrade"}
 	if dryRun {

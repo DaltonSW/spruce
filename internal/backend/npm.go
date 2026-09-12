@@ -22,7 +22,7 @@ import (
 type Npm struct{}
 
 func (Npm) Name() string  { return "npm" }
-func (Npm) Icon() string  { return "" }        // nf-dev-npm
+func (Npm) Icon() string  { return "" }       // nf-dev-npm
 func (Npm) Color() string { return "#cb3837" } // npm red
 
 func (Npm) Available() bool {
@@ -30,9 +30,8 @@ func (Npm) Available() bool {
 	return err == nil
 }
 
-// npmEnv keeps npm's output predictable: no color, no update-notifier banner,
-// no fund/audit noise, no progress spinner. Everything stays parseable and no
-// surprise prompt appears mid-run.
+// npmEnv keeps npm's output predictable: no color, banner, fund/audit noise,
+// or progress spinner.
 func npmEnv() []string {
 	return append(envBase(),
 		"NPM_CONFIG_COLOR=false",
@@ -44,9 +43,8 @@ func npmEnv() []string {
 }
 
 func (Npm) Check(ctx context.Context) ([]core.Update, error) {
-	// `npm outdated` exits non-zero precisely when there are outdated packages,
-	// so we can't treat a non-zero exit as failure — capture stdout and parse it
-	// regardless. Only a JSON parse failure is a real error.
+	// `npm outdated` exits non-zero when there are outdated packages, so
+	// ignore the exit code and parse stdout regardless.
 	cmd := exec.CommandContext(ctx, "npm", "outdated", "-g", "--json")
 	cmd.Env = npmEnv()
 	out, _ := cmd.Output()
@@ -62,10 +60,9 @@ type npmOutdatedEntry struct {
 	Location string `json:"location"`
 }
 
-// parseNpmOutdated turns `npm outdated -g --json` output into updates. The JSON
-// is an object keyed by package name; "{}" (nothing outdated) parses to an empty
-// map. Entries with no installed version, or already at latest, are skipped.
-// Results are sorted by name so the panel is stable (map order is random).
+// parseNpmOutdated turns `npm outdated -g --json` output into updates.
+// Entries with no installed version, or already at latest, are skipped.
+// Results are sorted by name since map order is random.
 func parseNpmOutdated(data []byte) ([]core.Update, error) {
 	data = []byte(strings.TrimSpace(string(data)))
 	if len(data) == 0 {
@@ -95,10 +92,8 @@ func parseNpmOutdated(data []byte) ([]core.Update, error) {
 }
 
 func (n Npm) Plan(ctx context.Context, selected []core.Update) (core.Plan, error) {
-	// `npm install -g` writes to the user's global prefix — no root, no
-	// dependency preview. If that prefix is root-owned (common with a
-	// system-wide Node), upgrades will fail without elevation; we never use raw
-	// sudo, so surface it as a Note for the review screen instead.
+	// A root-owned global prefix (common with system-wide Node) fails without
+	// elevation; we never use raw sudo, so surface it as a Note instead.
 	plan := core.Plan{Backend: n.Name(), Selected: selected, NeedsRoot: false}
 	if prefix, ok := npmRootOwnedPrefix(ctx); ok {
 		plan.Notes = append(plan.Notes, fmt.Sprintf(
@@ -109,9 +104,8 @@ func (n Npm) Plan(ctx context.Context, selected []core.Update) (core.Plan, error
 	return plan, nil
 }
 
-// npmRootOwnedPrefix reports whether npm's global install target is owned by
-// root (and not by the current user). Best-effort: any failure returns
-// ("", false) so it never blocks a plan.
+// npmRootOwnedPrefix reports whether npm's global install target is
+// root-owned. Best-effort: any failure returns ("", false).
 func npmRootOwnedPrefix(ctx context.Context) (string, bool) {
 	cmd := exec.CommandContext(ctx, "npm", "prefix", "-g")
 	cmd.Env = npmEnv()
@@ -157,10 +151,8 @@ func (n Npm) Apply(ctx context.Context, plan core.Plan) (<-chan core.ProgressEve
 				Text: "(dry run — nothing will be installed)"}
 		}
 
-		// A root-owned global prefix means every install below would fail with a
-		// cryptic EACCES; check once and skip the attempt entirely rather than
-		// let each package fail individually. We never use raw sudo (see
-		// CLAUDE.md), so this is unrecoverable without the user reconfiguring npm.
+		// A root-owned prefix fails every install with EACCES; check once and
+		// skip rather than let each package fail individually.
 		if !plan.DryRun {
 			if prefix, ok := npmRootOwnedPrefix(ctx); ok {
 				events <- core.ProgressEvent{Kind: core.EventError, Source: "npm", Text: fmt.Sprintf(
@@ -181,11 +173,10 @@ func (n Npm) Apply(ctx context.Context, plan core.Plan) (<-chan core.ProgressEve
 	return events, nil
 }
 
-// runInstall streams one `npm install -g <pkg>@latest`, translating its output
-// lines into structured events. npm's install output is sparse, so the phase is
-// fixed per package and completion is inferred from a clean exit. npm supports a
-// real --dry-run, so dry runs invoke it directly to show the resolver's output
-// without mutating anything.
+// runInstall streams one `npm install -g <pkg>@latest`. npm's install output
+// is sparse, so the phase is fixed per package and completion is inferred
+// from a clean exit. npm supports a real --dry-run, so dry runs invoke it
+// directly.
 func (Npm) runInstall(ctx context.Context, events chan<- core.ProgressEvent, u core.Update, dryRun bool) {
 	events <- core.ProgressEvent{Kind: core.EventPhase, Source: "npm", Item: u.Name, Phase: "Installing"}
 

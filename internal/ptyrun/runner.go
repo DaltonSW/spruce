@@ -122,10 +122,8 @@ func Stream(ctx context.Context, argv []string, opts Options) (<-chan Chunk, <-c
 	return chunks, done
 }
 
-// Answer writes a response (e.g. "y\n") to a child blocked on a prompt. It is
-// exposed for the rare case the caller decides to auto-answer; the PTY's master
-// file is the same object you'd write to. Kept here for symmetry — most flows
-// pass non-interactive flags and never need it.
+// Answer writes a response (e.g. "y\n") to a child blocked on a prompt. The
+// PTY's master file is the same object you'd write to.
 func Answer(w *os.File, text string) error {
 	_, err := w.WriteString(text)
 	return err

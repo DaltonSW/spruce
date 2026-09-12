@@ -24,7 +24,7 @@ import (
 type Pipx struct{}
 
 func (Pipx) Name() string  { return "pipx" }
-func (Pipx) Icon() string  { return "" }        // nf-dev-python
+func (Pipx) Icon() string  { return "" }       // nf-dev-python
 func (Pipx) Color() string { return "#ffd43b" } // Python yellow
 
 func (Pipx) Available() bool {
@@ -33,9 +33,8 @@ func (Pipx) Available() bool {
 }
 
 // pipxEnv keeps pipx's output parseable. Under the uv backend (pipx's default
-// when uv is on PATH), pipx forwards straight to uv's own colored output and
-// spinner/progress-bar redraws, which are keyed off the same env vars uv's
-// own commands respect (see uvEnv).
+// when uv is on PATH), pipx forwards to uv's own colored/spinner output, so
+// it needs the same env vars uv's own commands respect (see uvEnv).
 func pipxEnv() []string {
 	return append(envBase(), "NO_COLOR=1", "UV_NO_PROGRESS=1")
 }
@@ -83,9 +82,8 @@ func (Pipx) Check(ctx context.Context) ([]core.Update, error) {
 	}
 	sort.Slice(pkgs, func(i, j int) bool { return pkgs[i].name < pkgs[j].name })
 
-	// Latest-version resolution hits PyPI per package, so fan out with a
-	// bounded worker pool (mirrors Go.Check's use of the module proxy). Order
-	// is preserved to keep the panel stable.
+	// Latest-version resolution hits PyPI per package; fan out with a
+	// bounded worker pool.
 	ups := make([]core.Update, len(pkgs))
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
@@ -121,14 +119,11 @@ func (Pipx) Check(ctx context.Context) ([]core.Update, error) {
 	return out2, nil
 }
 
-// pypiHTTPClient is shared across latest-version lookups; a modest timeout
-// keeps one slow or unreachable package from stalling the whole Check.
+// pypiHTTPClient caps latency so one slow/unreachable package can't stall Check.
 var pypiHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 // pypiLatestVersion resolves a package's newest release via PyPI's JSON API,
-// or "" if it can't be determined (network error, unknown package, bad
-// response). Best-effort: a failure just means we don't offer an update for
-// that package.
+// or "" on any failure.
 func pypiLatestVersion(ctx context.Context, name string) string {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		"https://pypi.org/pypi/"+url.PathEscape(name)+"/json", nil)
@@ -156,8 +151,6 @@ func pypiLatestVersion(ctx context.Context, name string) string {
 }
 
 func (p Pipx) Plan(ctx context.Context, selected []core.Update) (core.Plan, error) {
-	// `pipx upgrade` writes to the user's pipx home (~/.local/share/pipx) — no
-	// root, no dependency preview.
 	plan := core.Plan{Backend: p.Name(), Selected: selected, NeedsRoot: false}
 	for _, u := range selected {
 		if u.Pinned {
@@ -176,8 +169,8 @@ func (p Pipx) Apply(ctx context.Context, plan core.Plan) (<-chan core.ProgressEv
 		defer close(events)
 
 		if plan.DryRun {
-			// pipx has no real dry-run flag, so we must never invoke it here —
-			// report what would run and stop. (Same discipline as goinstall.go.)
+			// pipx has no real dry-run flag, so never invoke it here — report
+			// what would run and stop.
 			for _, u := range plan.Selected {
 				if u.Pinned {
 					continue
@@ -201,19 +194,17 @@ func (p Pipx) Apply(ctx context.Context, plan core.Plan) (<-chan core.ProgressEv
 	return events, nil
 }
 
-// stripCursorVisibility removes ANSI cursor hide/show sequences (\x1b[?25l,
-// \x1b[?25h). pipx's Rich-based spinner emits these around the whole run
-// regardless of NO_COLOR, and left in place they'd leak raw escape codes into
-// the log pane.
+// stripCursorVisibility removes the ANSI cursor hide/show sequences pipx's
+// Rich-based spinner wraps around the run (unaffected by NO_COLOR).
 func stripCursorVisibility(s string) string {
 	s = strings.ReplaceAll(s, "\x1b[?25l", "")
 	s = strings.ReplaceAll(s, "\x1b[?25h", "")
 	return s
 }
 
-// runUpgrade streams one `pipx upgrade <pkg>`, translating its output lines
-// into structured events. pipx's install output is sparse, so the phase is
-// fixed per package and completion is inferred from a clean exit.
+// runUpgrade streams one `pipx upgrade <pkg>`. pipx's install output is
+// sparse, so the phase is fixed per package and completion is inferred from
+// a clean exit.
 func (Pipx) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, u core.Update) {
 	events <- core.ProgressEvent{Kind: core.EventPhase, Source: "pipx", Item: u.Name, Phase: "Upgrading"}
 
@@ -230,9 +221,6 @@ func (Pipx) runUpgrade(ctx context.Context, events chan<- core.ProgressEvent, u 
 	}
 
 	for ch := range chunks {
-		// pipx's own spinner (independent of uv's, which UV_NO_PROGRESS already
-		// silences) wraps the whole run in a cursor hide/show pair — strip those
-		// two control sequences so they never reach the log pane.
 		carry += stripCursorVisibility(ch.Data)
 		for {
 			i := strings.IndexByte(carry, '\n')

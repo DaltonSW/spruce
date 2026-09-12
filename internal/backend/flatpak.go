@@ -16,7 +16,7 @@ import (
 type Flatpak struct{}
 
 func (Flatpak) Name() string  { return "flatpak" }
-func (Flatpak) Icon() string  { return "" }        // nf-fa-cube
+func (Flatpak) Icon() string  { return "" }       // nf-fa-cube
 func (Flatpak) Color() string { return "#4a90d9" } // blue — the Flatpak brand
 
 func (Flatpak) Available() bool {
@@ -25,17 +25,15 @@ func (Flatpak) Available() bool {
 }
 
 func (Flatpak) Check(ctx context.Context) ([]core.Update, error) {
-	// Query each remote separately: a single broken remote (missing summary
-	// file) makes the global `remote-ls --updates` exit non-zero, but per-remote
-	// it only fails that one remote and we keep the rest.
+	// Query each remote separately so one broken remote doesn't fail the rest.
 	remotes, err := flatpakRemotes(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	// remote-ls --updates only reports the candidate (new) version. Pull the
-	// installed versions from `flatpak list` and join them on by app id.
-	// Best-effort: a failure just leaves CurrentVersion empty.
+	// remote-ls --updates only reports the new version; join installed
+	// versions from `flatpak list` by app id. Best-effort: a failure just
+	// leaves CurrentVersion empty.
 	installed := flatpakInstalledVersions(ctx)
 
 	seen := map[string]bool{}
@@ -64,14 +62,12 @@ func (Flatpak) Check(ctx context.Context) ([]core.Update, error) {
 				newCommit = f[3]
 			}
 			if len(f) > 4 {
-				// flatpak prints human sizes, e.g. "138.9 MB"; tolerate unparseable.
 				if n, err := humanize.ParseBytes(f[4]); err == nil {
 					u.SizeBytes = int64(n)
 				}
 			}
-			// Flatpak's version field often doesn't change between releases — the
-			// real difference is the commit — so fall back to it when versions
-			// match: "1.2 (aaaaaaa) → bbbbbbb".
+			// Version often doesn't change between releases; fall back to the
+			// commit when it matches: "1.2 (aaaaaaa) -> bbbbbbb".
 			if u.NewVersion == u.CurrentVersion {
 				from, to := shortCommit(cur.commit), shortCommit(newCommit)
 				u.CurrentVersion = joinVersionCommit(u.CurrentVersion, from)
@@ -183,12 +179,10 @@ func (f Flatpak) Apply(ctx context.Context, plan core.Plan) (<-chan core.Progres
 	return events, nil
 }
 
-// runUpdate streams a single `flatpak update -y --noninteractive <name>`,
-// translating output lines into structured events. Looping one app at a time
-// — rather than batching the whole selection into one flatpak invocation —
-// lets us announce the active item before flatpak prints anything and lets
-// the UI mark each item done as its own process exits, instead of inferring
-// completion from "Changes complete" chatter in a shared, multi-app stream.
+// runUpdate streams a single `flatpak update -y --noninteractive <name>`. One
+// app per invocation lets us announce the active item up front and mark it
+// done from its own process exit, rather than inferring completion from a
+// shared multi-app stream.
 func (f Flatpak) runUpdate(ctx context.Context, events chan<- core.ProgressEvent, u core.Update, dryRun bool) {
 	argv := []string{"flatpak", "update", "-y", "--noninteractive"}
 	if dryRun {

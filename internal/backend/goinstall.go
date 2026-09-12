@@ -23,7 +23,7 @@ import (
 type Go struct{}
 
 func (Go) Name() string  { return "go" }
-func (Go) Icon() string  { return "" }        // nf-seti-go
+func (Go) Icon() string  { return "" }       // nf-seti-go
 func (Go) Color() string { return "#00add8" } // gopher cyan — the Go brand
 
 func (Go) Available() bool {
@@ -31,10 +31,8 @@ func (Go) Available() bool {
 	return err == nil
 }
 
-// goEnv appends toolchain settings that keep child `go` invocations predictable.
-// GOTOOLCHAIN=local stops `go` from downloading a newer toolchain just because a
-// binary (or module) declares one — we only want to query and install, not
-// bootstrap a compiler.
+// goEnv stops `go` from downloading a newer toolchain just because a binary
+// declares one — we only want to query and install, not bootstrap a compiler.
 func goEnv() []string {
 	return append(envBase(), "GOTOOLCHAIN=local")
 }
@@ -62,9 +60,8 @@ func (Go) Check(ctx context.Context) ([]core.Update, error) {
 		return nil, err
 	}
 
-	// Read each binary's build info. Non-Go files, unreadable binaries, and
-	// locally-built (`(devel)`) binaries have no upstream version to compare and
-	// are skipped silently.
+	// Non-Go files, unreadable binaries, and locally-built (devel) binaries
+	// have no upstream version to compare and are skipped silently.
 	var bins []goBin
 	for _, e := range entries {
 		if e.IsDir() {
@@ -80,8 +77,7 @@ func (Go) Check(ctx context.Context) ([]core.Update, error) {
 		}
 	}
 
-	// Resolving each module's latest version hits the network, so fan out with a
-	// bounded worker pool. Order is preserved to keep the panel stable.
+	// Resolving latest versions hits the network; fan out with a bounded pool.
 	ups := make([]core.Update, len(bins))
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
@@ -135,10 +131,9 @@ func goBinDir(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("go: neither GOBIN nor GOPATH is set")
 }
 
-// parseGoVersionM extracts the module path, package path, and installed version
-// from `go version -m <binary>` output. It reports ok=false for output that
-// isn't a Go binary, lacks a mod line, or was built from local source
-// (version "(devel)").
+// parseGoVersionM extracts the module path, package path, and installed
+// version from `go version -m <binary>` output. Reports ok=false for
+// non-Go-binary output, a missing mod line, or a local build ("(devel)").
 func parseGoVersionM(name, out string) (goBin, bool) {
 	b := goBin{name: name}
 	for _, raw := range strings.Split(out, "\n") {
@@ -219,9 +214,8 @@ func (Go) installTarget(u core.Update) string {
 	return u.Name
 }
 
-// runInstall streams one `go install <pkg>@latest`, translating its output lines
-// into structured events. go's output is sparse ("go: downloading ..."), so the
-// phase is fixed per binary and completion is inferred from a clean exit.
+// runInstall streams one `go install <pkg>@latest`. go's output is sparse, so
+// the phase is fixed per binary and completion is inferred from a clean exit.
 func (g Go) runInstall(ctx context.Context, events chan<- core.ProgressEvent, u core.Update) {
 	target := g.installTarget(u)
 	events <- core.ProgressEvent{Kind: core.EventPhase, Source: "go", Item: u.Name, Phase: "Installing"}
