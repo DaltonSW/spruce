@@ -19,7 +19,7 @@ func DemoBackends() []core.Backend {
 	// packages so it stays fast per-item; the smaller managers install heftier
 	// things more slowly, so they don't all finish long before system.
 	return []core.Backend{
-		demoBackend{name: "system", icon: "", color: "#a3be8c", count: 42, checkDelay: 3800 * time.Millisecond, applyStep: 90 * time.Millisecond},
+		demoBackend{name: "system", icon: "", color: "#a3be8c", count: 42, checkDelay: 3800 * time.Millisecond, applyStep: 90 * time.Millisecond, staged: true},
 		demoBackend{name: "brew", icon: "", color: "#f6b552", count: 6, checkDelay: 1200 * time.Millisecond, applyStep: 520 * time.Millisecond},
 		demoBackend{name: "flatpak", icon: "", color: "#4a90d9", count: 3, checkDelay: 2300 * time.Millisecond, applyStep: 640 * time.Millisecond, failApply: true},
 		demoBackend{name: "snap", icon: "", color: "#e95420", count: 0, checkDelay: 800 * time.Millisecond, applyStep: 500 * time.Millisecond},
@@ -38,6 +38,7 @@ type demoBackend struct {
 	checkDelay time.Duration
 	applyStep  time.Duration // per-package apply pacing; see DemoBackends
 	failApply  bool          // emit an error partway through Apply, to exercise that path
+	staged     bool          // download everything, then install (PackageKit-style)
 }
 
 func (d demoBackend) Name() string  { return d.name }
@@ -89,6 +90,10 @@ func (d demoBackend) Apply(ctx context.Context, plan core.Plan) (<-chan core.Pro
 		if plan.DryRun {
 			emit(core.ProgressEvent{Kind: core.EventLog, Text: "(demo dry run — nothing changes)"})
 		}
+		if d.staged {
+			d.applyStaged(ctx, plan, emit)
+			return
+		}
 
 		for i, u := range plan.Selected {
 			if !emit(core.ProgressEvent{Kind: core.EventPhase, Item: u.Name, Phase: "Downloading"}) {
@@ -126,6 +131,67 @@ func (d demoBackend) Apply(ctx context.Context, plan core.Plan) (<-chan core.Pro
 	}()
 
 	return events, nil
+}
+
+// applyStaged mimics a PackageKit transaction: fetch everything, a silent
+// test-commit gap, then install (with unselected deps mixed in) and clean up.
+func (d demoBackend) applyStaged(ctx context.Context, plan core.Plan, emit func(core.ProgressEvent) bool) {
+	n := len(plan.Selected)
+	deps := n / 4
+	steps := float64(2*n + deps + 4) // download + install + deps + commit gap
+	step := 0.0
+	overall := func() bool {
+		step++
+		return emit(core.ProgressEvent{Kind: core.EventOverall, Fraction: min(step/steps, 1)})
+	}
+	if !emit(core.ProgressEvent{Kind: core.EventStatus, Phase: "downloading…"}) {
+		return
+	}
+	for _, u := range plan.Selected {
+		if !emit(core.ProgressEvent{Kind: core.EventPhase, Item: u.Name, Phase: "Downloading", Stage: core.StageDownload}) {
+			return
+		}
+		for f := 0.5; f <= 1.0; f += 0.5 {
+			if !sleep(ctx, jitter(d.applyStep/2)) ||
+				!emit(core.ProgressEvent{Kind: core.EventProgress, Item: u.Name, Fraction: f, Stage: core.StageDownload}) {
+				return
+			}
+		}
+		if !overall() {
+			return
+		}
+	}
+	if !emit(core.ProgressEvent{Kind: core.EventPhase, Stage: core.StageInstall}) ||
+		!emit(core.ProgressEvent{Kind: core.EventStatus, Phase: "testing changes…"}) {
+		return
+	}
+	for range 4 {
+		if !sleep(ctx, 6*d.applyStep) || !overall() {
+			return
+		}
+	}
+	if !emit(core.ProgressEvent{Kind: core.EventStatus, Phase: "updating…"}) {
+		return
+	}
+	for i, u := range plan.Selected {
+		names := []string{u.Name}
+		if deps > 0 && i%4 == 3 {
+			names = append([]string{fmt.Sprintf("lib%s-dep-%02d", d.name, i)}, names...)
+		}
+		for _, name := range names {
+			if !emit(core.ProgressEvent{Kind: core.EventPhase, Item: name, Phase: "Updating", Stage: core.StageInstall}) ||
+				!sleep(ctx, jitter(2*d.applyStep)) || !overall() {
+				return
+			}
+		}
+		if !emit(core.ProgressEvent{Kind: core.EventItemDone, Item: u.Name, OK: true}) {
+			return
+		}
+	}
+	if !emit(core.ProgressEvent{Kind: core.EventStatus, Phase: "cleaning up…"}) || !sleep(ctx, 8*d.applyStep) {
+		return
+	}
+	emit(core.ProgressEvent{Kind: core.EventDone, OK: true})
 }
 
 // jitter scales d by a random factor in [0.65, 1.35] so demo packages don't all

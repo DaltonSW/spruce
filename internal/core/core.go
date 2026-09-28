@@ -6,7 +6,10 @@
 // REST socket) stays isolated inside a backend implementation.
 package core
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Update is one upgradable item, normalized across package managers.
 type Update struct {
@@ -56,6 +59,17 @@ const (
 	EventStatus                    // transaction-wide phase label (no item), e.g.
 	// "resolving dependencies" — distinct from EventPhase so it never disturbs
 	// per-package item/progress state. Carried in the Phase field.
+	EventOverall // whole-transaction progress (Fraction, Remaining), deps included
+)
+
+// Stage says which half of a batched transaction an item event belongs to, for
+// backends (PackageKit) that download everything first, then install.
+type Stage int
+
+const (
+	StageNone     Stage = iota // backend doesn't distinguish stages
+	StageDownload              // fetching; the item isn't applied yet
+	StageInstall               // applying the item to the system
 )
 
 // ProgressEvent is the single currency Apply streams back to the UI.
@@ -68,6 +82,9 @@ type ProgressEvent struct {
 	Fraction float64 // 0.0–1.0 for EventProgress
 	Text     string  // log line / prompt question / error message
 	OK       bool    // for EventDone / EventItemDone
+	Stage    Stage   // for EventPhase / EventProgress; StageNone for most backends
+	// For EventOverall: the tool's own time-left estimate; 0 means unknown.
+	Remaining time.Duration
 }
 
 // Backend is one package manager. Implementations live in internal/backend.

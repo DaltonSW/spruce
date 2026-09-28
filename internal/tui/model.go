@@ -49,7 +49,15 @@ type srcState struct {
 	errText     string
 	failedItems map[string]bool // items that individually errored out; the backend kept going past them
 	seen        map[string]bool // package names that have been the active item at least once
-	logs        []string        // tail of this backend's raw output, shown in its panel
+	doneItems   map[string]bool // items a backend named in EventItemDone
+
+	// Staged backends (PackageKit) fetch everything before installing anything.
+	stage      core.Stage
+	dlFrac     map[string]float64 // download-stage progress, keyed by name; nil if never staged
+	overall    float64            // whole-transaction progress from EventOverall
+	hasOverall bool
+	remaining  time.Duration // backend's own time-left estimate; 0 = unknown
+	logs       []string      // tail of this backend's raw output, shown in its panel
 
 	started    time.Time // first event seen for this backend (apply start)
 	finishedAt time.Time // when EventDone arrived, to freeze the elapsed timer
@@ -78,6 +86,17 @@ func (st *srcState) markSeen(name string) {
 		st.seen = map[string]bool{}
 	}
 	st.seen[name] = true
+}
+
+// noteDownload records download-stage progress for name, kept monotonic.
+// Downloading doesn't count as seen: the package isn't applied yet.
+func (st *srcState) noteDownload(name string, frac float64) {
+	if st.dlFrac == nil {
+		st.dlFrac = map[string]float64{}
+	}
+	if frac >= st.dlFrac[name] {
+		st.dlFrac[name] = frac
+	}
 }
 
 // appendLog keeps a bounded tail of the backend's output for its panel.
@@ -1041,13 +1060,24 @@ func (m *Model) applyEvent(ev core.ProgressEvent) {
 	case core.EventPhase:
 		st.phase = ev.Phase
 		st.fraction = 0
-		if ev.Item != "" {
+		st.stage = ev.Stage
+		switch {
+		case ev.Item != "" && ev.Stage == core.StageDownload:
+			st.item = ev.Item
+			st.noteDownload(ev.Item, 0)
+		case ev.Item != "":
 			st.item = ev.Item
 			st.markSeen(ev.Item)
+		case ev.Stage != core.StageNone:
+			st.item = "" // stage change with nothing active, e.g. downloads finished
 		}
 	case core.EventProgress:
 		st.fraction = ev.Fraction
-		if ev.Item != "" {
+		st.stage = ev.Stage
+		if ev.Item != "" && ev.Stage == core.StageDownload {
+			st.item = ev.Item
+			st.noteDownload(ev.Item, ev.Fraction)
+		} else if ev.Item != "" {
 			st.item = ev.Item
 			st.markSeen(ev.Item)
 			if st.pkgFrac == nil {
@@ -1060,6 +1090,16 @@ func (m *Model) applyEvent(ev core.ProgressEvent) {
 	case core.EventItemDone:
 		st.done++
 		st.fraction = 0
+		if ev.Item != "" {
+			if st.doneItems == nil {
+				st.doneItems = map[string]bool{}
+			}
+			st.doneItems[ev.Item] = true
+		}
+	case core.EventOverall:
+		st.overall = clamp01(ev.Fraction)
+		st.hasOverall = true
+		st.remaining = ev.Remaining
 	case core.EventError:
 		// An error tied to one item (flatpak/npm/etc. keep applying the rest of
 		// the selection after a single package fails) marks just that row failed.

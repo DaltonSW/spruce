@@ -333,41 +333,9 @@ func (PackageKit) Apply(ctx context.Context, plan core.Plan) (<-chan core.Progre
 
 		// A real upgrade: polkit prompts here. (Dry runs returned above and never
 		// reach this mutating call.)
+		track := newPkApply(plan.Selected, func(ev core.ProgressEvent) { events <- ev })
 		err = runTransaction(ctx, conn, tpath,
-			pkTxIface+".UpdatePackages", []any{pkFlagOnlyTrusted, ids},
-			func(name string, body []any) {
-				switch name {
-				case "Package":
-					if len(body) >= 2 {
-						id, _ := body[1].(string)
-						n, _ := parsePackageID(id)
-						events <- core.ProgressEvent{Kind: core.EventPhase, Source: "system", Item: n, Phase: "Updating"}
-					}
-				case "ItemProgress":
-					if len(body) >= 3 {
-						id, _ := body[0].(string)
-						n, _ := parsePackageID(id)
-						pct, _ := toUint(body[2])
-						events <- core.ProgressEvent{Kind: core.EventProgress, Source: "system",
-							Item: n, Fraction: float64(pct) / 100.0}
-					}
-				case "PropertiesChanged":
-					// sa{sv}as: [iface, changed, invalidated]. The Status property
-					// is the transaction-wide phase; surface it as a status label.
-					if len(body) >= 2 {
-						if props, ok := body[1].(map[string]dbus.Variant); ok {
-							if v, has := props["Status"]; has {
-								if s, ok := toUint(v.Value()); ok {
-									if label := pkStatusLabel(s); label != "" {
-										events <- core.ProgressEvent{Kind: core.EventStatus,
-											Source: "system", Phase: label}
-									}
-								}
-							}
-						}
-					}
-				}
-			})
+			pkTxIface+".UpdatePackages", []any{pkFlagOnlyTrusted, ids}, track.signal)
 		if err != nil {
 			events <- core.ProgressEvent{Kind: core.EventError, Source: "system", Text: err.Error()}
 		}

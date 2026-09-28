@@ -1516,6 +1516,7 @@ const (
 	statActive
 	statDone
 	statFailed
+	statFetched // downloaded, waiting for a staged backend's install stage
 )
 
 // pkgRowStatus classifies the package at index i in the (ordered) selection,
@@ -1536,7 +1537,9 @@ func pkgRowStatus(i int, name string, st *srcState) pkgStat {
 		return statFailed
 	case st.finished && !st.failed:
 		return statDone
-	case i < st.done:
+	case st.doneItems[name]:
+		return statDone
+	case st.doneItems == nil && i < st.done: // backend counts without naming items
 		return statDone
 	case st.failed && name == st.item:
 		return statFailed
@@ -1544,9 +1547,11 @@ func pkgRowStatus(i int, name string, st *srcState) pkgStat {
 		return statActive
 	case st.seen[name]:
 		return statDone
-	default:
-		return statPending
 	}
+	if _, ok := st.dlFrac[name]; ok {
+		return statFetched
+	}
+	return statPending
 }
 
 // activeRow is the index the panel scrolls to keep in view: the package being
@@ -1681,7 +1686,7 @@ func (m Model) renderApplyPanel(src string, totalW, totalH, index int) string {
 			totalBytes += u.SizeBytes
 		}
 		frac := applyOverallFraction(pkgs, st)
-		body = append(body, padRight(m.applyBottomLine(st, done, frac, totalBytes, contentW), contentW))
+		body = append(body, padRight(m.applyBottomLine(pkgs, st, done, frac, totalBytes, contentW), contentW))
 	}
 	for len(body) < contentH {
 		body = append(body, padRight("", contentW))
@@ -1758,7 +1763,7 @@ func (m Model) renderApplyRow(i int, u core.Update, st *srcState, nameW, curW, n
 	// (dnf5's silent depsolve); show that on the next row so a one-row panel
 	// isn't a bare ○ for tens of seconds.
 	prepActive := st != nil && !st.finished && !st.failed && st.status != "" &&
-		st.item == "" && i == st.done
+		st.item == "" && i == st.done && st.stage == core.StageNone
 
 	var icon string
 	switch {
@@ -1768,6 +1773,8 @@ func (m Model) renderApplyRow(i int, u core.Update, st *srcState, nameW, curW, n
 		icon = cursorStyle.Render(m.spinner.View())
 	case status == statFailed:
 		icon = errStyle.Render("✗")
+	case status == statFetched:
+		icon = dimStyle.Render("↓")
 	default:
 		icon = dimStyle.Render("○")
 	}
@@ -1817,7 +1824,7 @@ func applyActiveNote(u core.Update, st *srcState) string {
 		return note
 	}
 	pct := fmt.Sprintf("%d%%", int(frac*100))
-	if u.SizeBytes > 0 {
+	if u.SizeBytes > 0 && st.stage != core.StageInstall {
 		downloaded := int64(frac * float64(u.SizeBytes))
 		return strings.TrimSpace(fmt.Sprintf("%s %s/%s %s",
 			note, formatBytes(downloaded), formatBytes(u.SizeBytes), pct))
@@ -1828,7 +1835,7 @@ func applyActiveNote(u core.Update, st *srcState) string {
 // applyBottomLine is the panel's summary footer: an error when failed, a done
 // note (with elapsed time) when finished, otherwise an overall progress bar with
 // a downloaded/total · rate · ETA cluster on the right when sizes are known.
-func (m Model) applyBottomLine(st *srcState, done int, frac float64, totalBytes int64, w int) string {
+func (m Model) applyBottomLine(pkgs []core.Update, st *srcState, done int, frac float64, totalBytes int64, w int) string {
 	switch {
 	case st != nil && st.failed:
 		return errStyle.Render(truncate("✗ "+st.errText, max(w, 1)))
@@ -1858,6 +1865,9 @@ func (m Model) applyBottomLine(st *srcState, done int, frac float64, totalBytes 
 		}
 		frac = clamp01(frac)
 		right := rateETA(st, frac, totalBytes)
+		if st != nil && (st.dlFrac != nil || st.hasOverall) {
+			right = stagedCluster(pkgs, st, totalBytes)
+		}
 		// In a narrow panel there's no room for both; keep the full-width bar and
 		// drop the cluster (the header still carries the elapsed timer).
 		const minBar = 8
@@ -1892,6 +1902,33 @@ func rateETA(st *srcState, frac float64, totalBytes int64) string {
 		if remain := float64(totalBytes-downloaded) / rate; remain > 0 {
 			parts = append(parts, "ETA "+formatDuration(time.Duration(remain*float64(time.Second))))
 		}
+	}
+	return strings.Join(parts, sepTight)
+}
+
+// stagedCluster is the footer's right side for a staged backend: bytes fetched
+// and rate while downloading, then the transaction phase. A byte-based ETA would
+// ignore the install stage, so only the backend's own estimate is shown.
+func stagedCluster(pkgs []core.Update, st *srcState, totalBytes int64) string {
+	var parts []string
+	if st.stage == core.StageDownload && totalBytes > 0 {
+		var got int64
+		for i, u := range pkgs {
+			f := st.dlFrac[u.Name]
+			if s := pkgRowStatus(i, u.Name, st); s == statDone || s == statFetched {
+				f = 1
+			}
+			got += int64(clamp01(f) * float64(u.SizeBytes))
+		}
+		parts = append(parts, formatBytes(got)+"/"+formatBytes(totalBytes))
+		if el := st.elapsed().Seconds(); el > 0 && got > 0 {
+			parts = append(parts, formatBytes(int64(float64(got)/el))+"/s")
+		}
+	} else if st.status != "" {
+		parts = append(parts, st.status)
+	}
+	if st.remaining > 0 {
+		parts = append(parts, "ETA "+formatDuration(st.remaining))
 	}
 	return strings.Join(parts, sepTight)
 }
@@ -2069,10 +2106,21 @@ func rowFraction(status pkgStat, name string, st *srcState) float64 {
 	switch status {
 	case statDone:
 		return 1.0
+	case statFetched:
+		return 0.5
 	case statActive, statFailed:
-		if st != nil {
+		if st == nil {
+			return 0
+		}
+		if st.dlFrac == nil {
 			return clamp01(st.pkgFrac[name])
 		}
+		// Staged: the download fills the first half, the install the second.
+		dl := st.dlFrac[name]
+		if st.stage == core.StageInstall || st.pkgFrac[name] > 0 {
+			dl = 1
+		}
+		return clamp01(0.5*clamp01(dl) + 0.5*st.pkgFrac[name])
 	}
 	return 0
 }
@@ -2083,6 +2131,9 @@ func rowFraction(status pkgStat, name string, st *srcState) float64 {
 // bar only ever advances — unlike a naive (done + current-item)/total, which
 // snaps backwards when a new package's fraction resets (e.g. PackageKit).
 func applyOverallFraction(pkgs []core.Update, st *srcState) float64 {
+	if st != nil && st.hasOverall {
+		return st.overall // the backend's own whole-transaction figure, deps included
+	}
 	if len(pkgs) == 0 {
 		return 0
 	}
